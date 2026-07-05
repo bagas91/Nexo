@@ -1,0 +1,13 @@
+---
+description: Zapflow/Nexo — VPS de desenvolvimento (Cristian Dev). Não confundir com produção Virginia Arruda.
+alwaysApply: true
+---
+
+# Nexo Dev — regras do workspace
+
+- Leia `saas_disparo/AGENTS.md` antes de alterar código ou reiniciar serviços.
+- **Esta VPS é DEV** (`cristian.vps-kinghost.net`). Produção do cliente fica em `virginiaarruda.vps-kinghost.net`.
+- Branding: editar `config/branding.ts` e `server/utils/branding.js` — não hardcodar "Virginia" no código desta VPS.
+- Backend correto: `saas_disparo/server/` (systemd `zapflow.service`).
+- WhatsApp: 1 sessão; evitar `systemctl restart` / `pm2 restart` sem necessidade.
+- Não commitar `.env`, `.wwebjs_auth/`, secrets.

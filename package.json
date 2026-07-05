@@ -1,0 +1,48 @@
+{
+  "name": "zapflow-saas---whatsapp-management",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "server": "cd server && npm start",
+    "server:dev": "cd server && npm run dev",
+    "server:monitor": "./scripts/start-with-monitor.sh dev",
+    "server:monitor:prod": "./scripts/start-with-monitor.sh prod",
+    "frontend": "./scripts/start-frontend.sh",
+    "start:all": "./scripts/start-all.sh",
+    "fix:whatsapp": "./scripts/fix-whatsapp-connection.sh",
+    "restore:session": "./scripts/restore-session.sh",
+    "backup:session": "curl -X POST http://localhost:3001/api/session/backup",
+    "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:restart": "pm2 restart zapflow-backend --kill-timeout 30000",
+    "pm2:stop": "pm2 stop zapflow-backend",
+    "fix:browser-lock": "bash scripts/fix-browser-lock.sh",
+    "logs:live": "./scripts/monitor-live.sh",
+    "logs:status": "./scripts/monitor-logs.sh --status",
+    "logs:today": "./scripts/monitor-logs.sh --today",
+    "install:all": "npm install && cd server && npm install",
+    "check:ops": "./scripts/check-zapflow.sh",
+    "check:ops:watch": "./scripts/check-zapflow.sh --watch",
+    "check:ops:rescue": "./scripts/check-zapflow.sh --rescue"
+  },
+  "dependencies": {
+    "@google/genai": "^1.38.0",
+    "@xyflow/react": "^12.11.1",
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.23",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.8.2",
+    "vite": "^6.4.3"
+  }
+}
