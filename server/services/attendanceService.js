@@ -106,6 +106,12 @@ async function processAgentReply({ chatId, phone, contactName, body }) {
             return;
         }
 
+        const { hasActiveFollowUpRun } = await import('./followUpEngine.js');
+        if (hasActiveFollowUpRun(chatId)) {
+            logger.info('Atendimento: follow-up ativo — IA pausada para este chat');
+            return;
+        }
+
         if (matchesHumanKeyword(body, cfg.humanKeywords)) {
             chatDB.setInboxConversationMode(chatId, 'human');
             chatDB.setInboxConversationStatus(chatId, 'pending');

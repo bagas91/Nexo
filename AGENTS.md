@@ -61,7 +61,7 @@ npm run check:ops
 
 ## Limitações conhecidas
 
-- Flows / Follow Ups: UI pronta, **não executam**
+- Flows / Follow Ups: Flows ainda não executam; **Follow Ups executam** (wait, message, tag, webhook)
 - Webhooks Woo/Bling: logam evento, **não disparam WhatsApp**
 - Multi-WhatsApp: **não implementado**
 

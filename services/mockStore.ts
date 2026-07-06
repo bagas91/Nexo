@@ -111,13 +111,21 @@ export interface WooCommerceConfig {
   storeUrl: string;
   consumerKey: string;
   consumerSecret: string;
+  credentialsConfigured?: boolean;
+  syncOrders?: boolean;
   events: Record<string, boolean>;
+  eventMessages?: Record<string, string>;
   connectedAt?: number;
 }
 
 export interface BlingConfig {
   connected: boolean;
   apiKey: string;
+  accessToken?: string;
+  clientId?: string;
+  clientSecret?: string;
+  refreshToken?: string;
+  tokenConfigured?: boolean;
   syncProducts: boolean;
   syncOrders: boolean;
   notifyNfe: boolean;

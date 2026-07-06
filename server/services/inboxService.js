@@ -106,6 +106,14 @@ export async function persistInboxMessage(msg, opts = {}) {
         });
 
         if (!msg.fromMe && !opts.silent) {
+            const isNewContact = chatDB.countInboundMessages(peerJid) === 1;
+
+            import('./followUpEngine.js').then(({ handleInboundMessage }) => {
+                handleInboundMessage({ chatId: peerJid, phone, contactName, body, isNewContact });
+            }).catch((err) => {
+                logger.warn('Inbox: falha ao processar follow ups', err?.message || err);
+            });
+
             import('./attendanceService.js').then(({ scheduleAgentReply }) => {
                 scheduleAgentReply({ chatId: peerJid, phone, contactName, body });
             }).catch((err) => {

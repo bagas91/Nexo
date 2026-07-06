@@ -1,9 +1,24 @@
 /**
- * Processamento de webhooks WooCommerce e Bling — registra eventos e prepara mensagens WhatsApp.
+ * Processamento de webhooks WooCommerce e Bling — registra eventos e envia WhatsApp.
  */
 
 import chatDB from '../db/database.js';
 import logger from '../utils/logger.js';
+import {
+    parseBlingWebhookBody,
+    enrichBlingFromApi,
+    resolveBlingMessage,
+    mapBlingOrder,
+    getBlingAccessToken,
+} from './blingService.js';
+import {
+    parseWooOrder,
+    resolveWooMessage,
+    isWooEventEnabled,
+    normalizeWooWebhookEvent,
+    fetchWooOrder,
+    getWooCredentials,
+} from './wooService.js';
 
 function normalizePhone(raw) {
     const d = String(raw || '').replace(/\D/g, '');
@@ -12,69 +27,167 @@ function normalizePhone(raw) {
     return d;
 }
 
-function wooOrderMessage(eventType, payload) {
-    const name = payload?.billing?.first_name || payload?.customer_name || 'Cliente';
-    const total = payload?.total || payload?.order_total || '';
-    const id = payload?.id || payload?.number || '';
-    switch (eventType) {
-        case 'order.created':
-        case 'order_created':
-            return `Olá ${name}! Recebemos seu pedido #${id}${total ? ` (R$ ${total})` : ''}. Obrigado pela compra! 🛍️`;
-        case 'order.completed':
-        case 'order_completed':
-            return `Olá ${name}! Seu pedido #${id} foi concluído. Qualquer dúvida, estamos aqui! ✅`;
-        case 'cart.abandoned':
-        case 'cart_abandoned':
-            return `Olá ${name}! Vi que você deixou itens no carrinho. Posso ajudar a finalizar? 🛒`;
-        default:
-            return `Olá ${name}! Atualização do pedido #${id}.`;
+async function sendIntegrationWhatsApp(phone, text) {
+    const digits = normalizePhone(phone);
+    const message = String(text || '').trim();
+    if (!digits || digits.length < 10 || !message) return { sent: false, reason: 'telefone ou mensagem inválidos' };
+
+    const { default: whatsappClient } = await import('./whatsappClient.js');
+    if (!whatsappClient.getStatus().ready) {
+        return { sent: false, reason: 'WhatsApp não conectado' };
     }
+    await whatsappClient.sendPrivateMessage(digits, message);
+    return { sent: true, phone: digits };
 }
 
-function blingOrderMessage(eventType, payload) {
-    const name = payload?.contato?.nome || payload?.customer || 'Cliente';
-    const id = payload?.numero || payload?.id || '';
-    const status = payload?.situacao || payload?.status || '';
-    const cfg = chatDB.getPlatformKv('bling') || {};
-    const mapped = (cfg.statusMap || []).find((s) => s.active && s.blingStatus === status);
-    if (mapped?.message) return mapped.message.replace(/\{\{nome\}\}/gi, name).replace(/\{\{pedido\}\}/gi, String(id));
-    return `Olá ${name}! Atualização do pedido ${id}${status ? `: ${status}` : ''}.`;
-}
+export async function processWooWebhook(eventType, payload = {}) {
+    const cfg = chatDB.getPlatformKv('woocommerce') || {};
+    const normalizedType = normalizeWooWebhookEvent(eventType, payload);
+    let order = parseWooOrder(payload);
 
-export function processWooWebhook(eventType, payload = {}) {
-    const phone = normalizePhone(payload?.billing?.phone || payload?.phone || payload?.customer_phone || '');
-    const customer = [payload?.billing?.first_name, payload?.billing?.last_name].filter(Boolean).join(' ') || payload?.customer_name || 'Cliente';
-    const preview = wooOrderMessage(eventType, payload);
+    if (!order.phone && order.orderId && getWooCredentials(cfg)) {
+        try {
+            const full = await fetchWooOrder(order.orderId, getWooCredentials(cfg));
+            if (full) order = parseWooOrder(full);
+        } catch (err) {
+            logger.warn('Woo: não foi possível buscar pedido completo', err?.message || err);
+        }
+    }
+
+    const phone = normalizePhone(order.phone);
+    const customer = order.customer;
+    const preview = resolveWooMessage(normalizedType, order, cfg);
+    const enabled = isWooEventEnabled(normalizedType, cfg);
+
+    let eventStatus = phone ? 'queued' : 'failed';
     const event = chatDB.addIntegrationEvent({
         source: 'woocommerce',
-        eventType,
-        summary: `WooCommerce: ${eventType}${payload?.id ? ` #${payload.id}` : ''}`,
+        eventType: normalizedType,
+        summary: `WooCommerce: ${normalizedType}${order.numero ? ` #${order.numero}` : ''}`,
         customer,
         phone,
-        status: phone ? 'queued' : 'failed',
+        status: eventStatus,
         whatsappPreview: preview,
         payloadJson: payload,
     });
-    logger.info('Webhook WooCommerce registrado', { eventType, id: event?.id, phone: phone ? `${phone.slice(0, 4)}…` : 'sem telefone' });
-    return event;
+
+    logger.info('Webhook WooCommerce registrado', {
+        eventType: normalizedType,
+        id: event?.id,
+        phone: phone ? `${phone.slice(0, 4)}…` : 'sem telefone',
+        enabled,
+    });
+
+    if (enabled && phone && preview) {
+        try {
+            const result = await sendIntegrationWhatsApp(phone, preview);
+            if (result.sent) {
+                eventStatus = 'processed';
+                chatDB.updateIntegrationEvent(event.id, { status: 'processed' });
+                logger.info('Woo: WhatsApp enviado', { eventId: event.id, phone: result.phone?.slice(0, 6) });
+            } else {
+                chatDB.updateIntegrationEvent(event.id, { status: 'failed' });
+                logger.warn('Woo: WhatsApp não enviado', result.reason);
+            }
+        } catch (err) {
+            chatDB.updateIntegrationEvent(event.id, { status: 'failed' });
+            logger.error('Woo: erro ao enviar WhatsApp', err?.message || err);
+        }
+    } else if (!enabled) {
+        chatDB.updateIntegrationEvent(event.id, { status: 'skipped' });
+        logger.info('Woo: evento desativado nas configurações', normalizedType);
+    } else if (!phone) {
+        logger.warn('Woo: evento sem telefone do cliente — preencha billing.phone no pedido');
+    }
+
+    import('./followUpEngine.js').then(({ handleIntegrationEvent }) => {
+        handleIntegrationEvent({
+            source: 'woocommerce',
+            eventType: normalizedType,
+            phone,
+            customer,
+            eventId: event?.id,
+        });
+    }).catch((err) => logger.warn('FollowUp: webhook Woo', err?.message || err));
+
+    return chatDB.getIntegrationEvent(event.id) || event;
 }
 
-export function processBlingWebhook(eventType, payload = {}) {
-    const phone = normalizePhone(payload?.contato?.telefone || payload?.phone || payload?.customer_phone || '');
-    const customer = payload?.contato?.nome || payload?.customer || 'Cliente';
-    const preview = blingOrderMessage(eventType, payload);
+export async function processBlingWebhook(eventType, payload = {}) {
+    const cfg = chatDB.getPlatformKv('bling') || {};
+    const parsed = parseBlingWebhookBody({ ...payload, event: eventType, tipo: eventType });
+
+    let order = parsed.order;
+    if (!order?.phone && parsed.orderId && getBlingAccessToken(cfg)) {
+        order = await enrichBlingFromApi(parsed) || order;
+    }
+    if (!order && payload?.contato) {
+        order = mapBlingOrder(payload);
+    }
+
+    const phone = normalizePhone(order?.phone || payload?.contato?.telefone || payload?.phone || '');
+    const customer = order?.customer || payload?.contato?.nome || payload?.customer || 'Cliente';
+    const status = order?.status || payload?.situacao || payload?.status || '';
+    const numero = order?.numero || payload?.numero || parsed.orderId || '';
+
+    const preview = resolveBlingMessage(status, {
+        customer,
+        numero,
+        orderId: order?.orderId || parsed.orderId,
+        rastreio: order?.rastreio || payload?.rastreio || '',
+    });
+
+    let eventStatus = phone ? 'queued' : 'failed';
     const event = chatDB.addIntegrationEvent({
         source: 'bling',
-        eventType,
-        summary: `Bling: ${eventType}${payload?.numero ? ` #${payload.numero}` : ''}`,
+        eventType: parsed.eventType,
+        summary: `Bling: ${parsed.eventType}${numero ? ` #${numero}` : ''}${status ? ` — ${status}` : ''}`,
         customer,
         phone,
-        status: phone ? 'queued' : 'failed',
+        status: eventStatus,
         whatsappPreview: preview,
         payloadJson: payload,
     });
-    logger.info('Webhook Bling registrado', { eventType, id: event?.id });
-    return event;
+
+    logger.info('Webhook Bling registrado', {
+        eventType: parsed.eventType,
+        id: event?.id,
+        orderId: parsed.orderId,
+        status,
+        phone: phone ? `${phone.slice(0, 4)}…` : 'sem telefone',
+    });
+
+    const shouldSendWa = cfg.syncOrders !== false;
+    if (shouldSendWa && phone && preview) {
+        try {
+            const result = await sendIntegrationWhatsApp(phone, preview);
+            if (result.sent) {
+                eventStatus = 'processed';
+                chatDB.updateIntegrationEvent(event.id, { status: 'processed' });
+                logger.info('Bling: WhatsApp enviado', { eventId: event.id, phone: result.phone?.slice(0, 6) });
+            } else {
+                chatDB.updateIntegrationEvent(event.id, { status: 'failed' });
+                logger.warn('Bling: WhatsApp não enviado', result.reason);
+            }
+        } catch (err) {
+            chatDB.updateIntegrationEvent(event.id, { status: 'failed' });
+            logger.error('Bling: erro ao enviar WhatsApp', err?.message || err);
+        }
+    } else if (!phone) {
+        logger.warn('Bling: evento sem telefone do cliente — configure contato no pedido ou token API para buscar pedido completo');
+    }
+
+    import('./followUpEngine.js').then(({ handleIntegrationEvent }) => {
+        handleIntegrationEvent({
+            source: 'bling',
+            eventType: parsed.eventType,
+            phone,
+            customer,
+            eventId: event?.id,
+        });
+    }).catch((err) => logger.warn('FollowUp: webhook Bling', err?.message || err));
+
+    return chatDB.getIntegrationEvent(event.id) || event;
 }
 
 export default { processWooWebhook, processBlingWebhook };

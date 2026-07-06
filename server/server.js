@@ -16,6 +16,7 @@ import userService from './utils/userService.js';
 import imageService from './utils/imageService.js';
 import crypto from 'crypto';
 import platformRoutes, { webhookRouter } from './routes/platformRoutes.js';
+import { handleBlingOAuthCallback } from './routes/blingOAuth.js';
 import { ensurePlatformDefaults } from './utils/platformDefaults.js';
 import { ensurePlatformSeeds } from './utils/platformSeeds.js';
 
@@ -246,13 +247,22 @@ app.post('/api/debug-log', (req, res) => {
 // Webhooks de integração (token na query — antes do auth JWT)
 app.use('/api/webhooks', webhookRouter);
 
+// OAuth Bling — callback público (cadastre esta URL no app Bling)
+app.get('/api/bling/oauth/callback', handleBlingOAuthCallback);
+
 ensurePlatformDefaults();
 ensurePlatformSeeds();
 
 // Servir arquivos estáticos do frontend (quando buildado)
 const distPath = path.join(__dirname, '../dist');
 if (fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, {
+        setHeaders(res, filePath) {
+            if (filePath.endsWith('index.html')) {
+                res.setHeader('Cache-Control', 'no-cache');
+            }
+        },
+    }));
 }
 
 // Autenticação por sessão (JWT) ou API_KEY legado
@@ -1610,6 +1620,7 @@ app.get('/api/studio/files/:filename', (req, res) => {
 app.get('*', (req, res) => {
     const distIndex = path.join(__dirname, '../dist/index.html');
     if (fs.existsSync(distIndex)) {
+        res.set('Cache-Control', 'no-cache');
         res.sendFile(distIndex);
     } else {
         res.status(404).json({
@@ -1897,10 +1908,19 @@ app.listen(PORT, () => {
     logger.info(`Servidor Backend ✅ Rodando na porta ${PORT}`);
     logger.info(`WhatsApp Inicializando cliente...`);
     // Quando o WhatsApp ficar pronto (ou reconectar), processa agendamentos vencidos na hora
-    whatsappClient.setOnReadyCallback(() => runScheduleWorker().catch((err) => logger.error('Worker agendamentos (onReady)', err?.message || err)));
-    // Executa o worker de agendamentos imediatamente e depois a cada 60s (evita esperar 1 min se o usuário agendou "para agora")
     runScheduleWorker().catch((err) => logger.error('Worker agendamentos (inicial)', err?.message || err));
     setInterval(() => runScheduleWorker().catch((err) => logger.error('Worker agendamentos', err?.message || err)), SCHEDULE_WORKER_INTERVAL_MS);
+
+    const FOLLOWUP_WORKER_INTERVAL_MS = 30 * 1000;
+    import('./services/followUpEngine.js').then(({ processDueFollowUpRuns }) => {
+        whatsappClient.setOnReadyCallback(() => {
+            runScheduleWorker().catch((err) => logger.error('Worker agendamentos (onReady)', err?.message || err));
+            processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (onReady)', err?.message || err));
+        });
+        processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (inicial)', err?.message || err));
+        setInterval(() => processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups', err?.message || err)), FOLLOWUP_WORKER_INTERVAL_MS);
+    }).catch((err) => logger.error('FollowUp engine não carregou', err?.message || err));
+
     startDailyRestartScheduler();
     startHealthcheckMonitor();
     notifier.validateDiscordWebhook?.().catch(() => {});

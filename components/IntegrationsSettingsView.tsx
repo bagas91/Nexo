@@ -5,6 +5,26 @@ import type { BlingConfig, IntegrationConfig, WooCommerceConfig } from '../servi
 import type { SettingsTab } from './SettingsView';
 import IntegrationEventLog from './IntegrationEventLog';
 
+const INTEGRATIONS_FALLBACK: IntegrationConfig[] = [];
+
+const WOO_FALLBACK: WooCommerceConfig = {
+  connected: false,
+  storeUrl: '',
+  consumerKey: '',
+  consumerSecret: '',
+  events: {},
+};
+
+const BLING_FALLBACK: BlingConfig = {
+  connected: false,
+  apiKey: '',
+  syncProducts: true,
+  syncOrders: true,
+  notifyNfe: true,
+  notifyLowStock: false,
+  statusMap: [],
+};
+
 const META: Record<string, { name: string; icon: string; desc: string; featured?: boolean }> = {
   woocommerce: {
     name: 'WooCommerce',
@@ -35,9 +55,9 @@ interface IntegrationsSettingsViewProps {
 
 const IntegrationsSettingsView: React.FC<IntegrationsSettingsViewProps> = ({ onTabChange }) => {
   const { showToast } = useToast();
-  const { value: integrations, save: saveIntegrations, loading } = usePlatformKv<IntegrationConfig[]>('integrations', []);
-  const { value: wooCfg } = usePlatformKv<WooCommerceConfig>('woocommerce', { connected: false, storeUrl: '', consumerKey: '', consumerSecret: '', events: {} });
-  const { value: blingCfg } = usePlatformKv<BlingConfig>('bling', { connected: false, apiKey: '', syncProducts: true, syncOrders: true, notifyNfe: true, notifyLowStock: false, statusMap: [] });
+  const { value: integrations, save: saveIntegrations, loading } = usePlatformKv<IntegrationConfig[]>('integrations', INTEGRATIONS_FALLBACK);
+  const { value: wooCfg } = usePlatformKv<WooCommerceConfig>('woocommerce', WOO_FALLBACK);
+  const { value: blingCfg } = usePlatformKv<BlingConfig>('bling', BLING_FALLBACK);
   const { events } = useIntegrationEvents();
 
   const featured = integrations.filter((i) => META[i.id]?.featured);
@@ -65,7 +85,7 @@ const IntegrationsSettingsView: React.FC<IntegrationsSettingsViewProps> = ({ onT
     const meta = META[item.id] || { name: item.id, icon: 'fa-plug', desc: '' };
     const detailTab = DETAIL_TABS[item.id];
     const isConnected = item.connected
-      || (item.id === 'woocommerce' && wooCfg.connected)
+      || (item.id === 'woocommerce' && (wooCfg.connected || wooCfg.credentialsConfigured))
       || (item.id === 'bling' && blingCfg.connected);
 
     return (

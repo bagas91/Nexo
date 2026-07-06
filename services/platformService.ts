@@ -53,6 +53,74 @@ export const platformService = {
     await api(`/entities/${type}/${id}`, { method: 'DELETE' });
   },
 
+  async enrollFollowUp(followUpId: string, phone: string, contactName?: string) {
+    return api<{ success: boolean; run: unknown }>(`/followups/${followUpId}/enroll`, {
+      method: 'POST',
+      body: JSON.stringify({ phone, contactName }),
+    });
+  },
+
+  async listFollowUpRuns(limit = 50) {
+    return api<Array<{
+      id: string;
+      followupName: string;
+      phone: string;
+      contactName: string;
+      stepIndex: number;
+      status: string;
+      nextRunAt: number | null;
+    }>>(`/followups/runs?limit=${limit}`);
+  },
+
+  async installEcommerceFollowUps() {
+    return api<{ success: boolean; added: number; message: string }>('/followups/install-ecommerce', {
+      method: 'POST',
+    });
+  },
+
+  async testBlingConnection(accessToken?: string) {
+    return api<{ ok: boolean; message: string }>('/bling/test-connection', {
+      method: 'POST',
+      body: JSON.stringify(accessToken ? { accessToken } : {}),
+    });
+  },
+
+  async testWooConnection(params?: { storeUrl?: string; consumerKey?: string; consumerSecret?: string }) {
+    return api<{ ok: boolean; message: string }>('/woocommerce/test-connection', {
+      method: 'POST',
+      body: JSON.stringify(params || {}),
+    });
+  },
+
+  async saveWooCredentials(storeUrl: string, consumerKey: string, consumerSecret: string) {
+    return api<{ success: boolean; message: string; value: unknown }>('/woocommerce/credentials', {
+      method: 'PUT',
+      body: JSON.stringify({ storeUrl, consumerKey, consumerSecret }),
+    });
+  },
+
+  async connectBling(accessToken: string) {
+    return api<{ success: boolean; message: string }>('/bling/connect', {
+      method: 'POST',
+      body: JSON.stringify({ accessToken }),
+    });
+  },
+
+  async saveBlingCredentials(clientId: string, clientSecret: string) {
+    return api<{ success: boolean; redirectUri: string; value: import('./mockStore').BlingConfig }>('/bling/credentials', {
+      method: 'PUT',
+      body: JSON.stringify({ clientId, clientSecret }),
+    });
+  },
+
+  async getBlingRedirectUri() {
+    return api<{ redirectUri: string }>('/bling/oauth/redirect-uri');
+  },
+
+  async getBlingAuthorizeUrl() {
+    return api<{ url: string; redirectUri: string }>('/bling/oauth/authorize-url');
+  },
+
   async listIntegrationEvents(source?: 'woocommerce' | 'bling') {
     const q = source ? `?source=${source}&limit=50` : '?limit=50';
     return api<Array<{

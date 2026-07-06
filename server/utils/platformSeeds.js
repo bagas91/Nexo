@@ -5,6 +5,7 @@
 import chatDB from '../db/database.js';
 import { PASTORAL_AGENT_PROMPT } from './agentPrompts.js';
 import { BRANDING } from './branding.js';
+import { ensureEcommerceFollowUps } from './ecommerceFollowUps.js';
 
 const SEED_FOLLOWUPS = [
     {
@@ -148,6 +149,7 @@ function upgradeWeakAgentPrompts() {
 
 export function ensurePlatformSeeds() {
     seedEntities('followups', SEED_FOLLOWUPS);
+    ensureEcommerceFollowUps();
     seedEntities('agents', SEED_AGENTS);
     upgradeWeakAgentPrompts();
     seedEntities('flows', SEED_FLOWS);

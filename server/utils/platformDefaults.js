@@ -19,12 +19,20 @@ const DEFAULT_WOO = {
     storeUrl: BRANDING.storeUrl,
     consumerKey: '',
     consumerSecret: '',
+    syncOrders: true,
     events: {
         'order.created': true,
         'order.processing': true,
         'order.completed': true,
         'order.shipped': false,
         'cart.abandoned': true,
+    },
+    eventMessages: {
+        'order.created': 'Olá {{nome}}! Recebemos seu pedido #{{numero}}{{total}}. Obrigado pela compra! 🛍️',
+        'order.processing': 'Olá {{nome}}! Pagamento do pedido #{{numero}} confirmado. Estamos preparando seu envio. ✅',
+        'order.completed': 'Olá {{nome}}! Seu pedido #{{numero}} foi concluído. Qualquer dúvida, estamos aqui! 🎉',
+        'order.shipped': 'Olá {{nome}}! Pedido #{{numero}} enviado{{rastreio}}. 📦',
+        'cart.abandoned': 'Olá {{nome}}! Vi que você deixou itens no carrinho. Posso ajudar a finalizar? 🛒',
     },
 };
 

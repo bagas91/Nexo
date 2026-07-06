@@ -173,6 +173,29 @@ db.exec(`
         mode TEXT NOT NULL DEFAULT 'bot'
     )
 `);
+
+db.exec(`
+    CREATE TABLE IF NOT EXISTS followup_runs (
+        id TEXT PRIMARY KEY,
+        followupId TEXT NOT NULL,
+        followupName TEXT NOT NULL,
+        chatId TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        contactName TEXT,
+        stepIndex INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        nextRunAt INTEGER,
+        contextJson TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+    )
+`);
+try {
+    db.exec('CREATE INDEX IF NOT EXISTS idx_followup_runs_due ON followup_runs(status, nextRunAt)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_followup_runs_chat ON followup_runs(chatId, status)');
+} catch (e) {
+    if (!e.message?.includes('already exists')) throw e;
+}
 try {
     db.exec("ALTER TABLE inbox_conversations ADD COLUMN mode TEXT NOT NULL DEFAULT 'bot'");
 } catch (e) {
@@ -649,6 +672,19 @@ class ChatDatabase {
         return this.getIntegrationEvent(id);
     }
 
+    updateIntegrationEvent(id, patch) {
+        const fields = [];
+        const values = [];
+        if (patch.status !== undefined) { fields.push('status = ?'); values.push(patch.status); }
+        if (patch.whatsappPreview !== undefined) { fields.push('whatsappPreview = ?'); values.push(patch.whatsappPreview); }
+        if (patch.phone !== undefined) { fields.push('phone = ?'); values.push(patch.phone); }
+        if (patch.customer !== undefined) { fields.push('customer = ?'); values.push(patch.customer); }
+        if (fields.length === 0) return this.getIntegrationEvent(id);
+        values.push(id);
+        db.prepare(`UPDATE integration_events SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+        return this.getIntegrationEvent(id);
+    }
+
     getIntegrationEvent(id) {
         const row = db.prepare('SELECT * FROM integration_events WHERE id = ?').get(id);
         if (!row) return null;
@@ -789,6 +825,131 @@ class ChatDatabase {
     markInboxConversationRead(chatId) {
         db.prepare('UPDATE inbox_messages SET seen = 1 WHERE chatId = ? AND fromMe = 0').run(chatId);
         db.prepare('UPDATE inbox_conversations SET unread = 0 WHERE chatId = ?').run(chatId);
+    }
+
+    countInboundMessages(chatId) {
+        const row = db.prepare('SELECT COUNT(*) as c FROM inbox_messages WHERE chatId = ? AND fromMe = 0').get(chatId);
+        return row?.c ?? 0;
+    }
+
+    mapFollowUpRun(row) {
+        if (!row) return null;
+        let context = {};
+        try {
+            context = row.contextJson ? JSON.parse(row.contextJson) : {};
+        } catch {
+            context = {};
+        }
+        return {
+            id: row.id,
+            followupId: row.followupId,
+            followupName: row.followupName,
+            chatId: row.chatId,
+            phone: row.phone,
+            contactName: row.contactName || '',
+            stepIndex: row.stepIndex,
+            status: row.status,
+            nextRunAt: row.nextRunAt,
+            context,
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+        };
+    }
+
+    saveFollowUpRun(run) {
+        const now = Date.now();
+        const id = run.id || `fur_${now}_${Math.random().toString(36).slice(2, 8)}`;
+        const createdAt = run.createdAt || now;
+        const contextJson = JSON.stringify(run.context || {});
+        db.prepare(`
+            INSERT INTO followup_runs (
+                id, followupId, followupName, chatId, phone, contactName,
+                stepIndex, status, nextRunAt, contextJson, createdAt, updatedAt
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                stepIndex = excluded.stepIndex,
+                status = excluded.status,
+                nextRunAt = excluded.nextRunAt,
+                contextJson = excluded.contextJson,
+                contactName = excluded.contactName,
+                updatedAt = excluded.updatedAt
+        `).run(
+            id,
+            run.followupId,
+            run.followupName || '',
+            run.chatId,
+            run.phone,
+            run.contactName || '',
+            run.stepIndex ?? 0,
+            run.status || 'active',
+            run.nextRunAt ?? null,
+            contextJson,
+            createdAt,
+            now
+        );
+        return this.getFollowUpRun(id);
+    }
+
+    getFollowUpRun(id) {
+        const row = db.prepare('SELECT * FROM followup_runs WHERE id = ?').get(id);
+        return this.mapFollowUpRun(row);
+    }
+
+    hasActiveFollowUpRun(followupId, chatId) {
+        const row = db.prepare(`
+            SELECT id FROM followup_runs
+            WHERE followupId = ? AND chatId = ? AND status IN ('active', 'waiting')
+            LIMIT 1
+        `).get(followupId, chatId);
+        return !!row;
+    }
+
+    hasAnyActiveFollowUpRun(chatId) {
+        const row = db.prepare(`
+            SELECT id FROM followup_runs
+            WHERE chatId = ? AND status IN ('active', 'waiting')
+            LIMIT 1
+        `).get(chatId);
+        return !!row;
+    }
+
+    listFollowUpRunsDue(now = Date.now()) {
+        return db.prepare(`
+            SELECT * FROM followup_runs
+            WHERE status = 'waiting' AND nextRunAt IS NOT NULL AND nextRunAt <= ?
+            ORDER BY nextRunAt ASC
+            LIMIT 50
+        `).all(now).map((row) => this.mapFollowUpRun(row));
+    }
+
+    listActiveFollowUpRuns(limit = 100) {
+        return db.prepare(`
+            SELECT * FROM followup_runs
+            WHERE status IN ('active', 'waiting')
+            ORDER BY updatedAt DESC
+            LIMIT ?
+        `).all(limit).map((row) => this.mapFollowUpRun(row));
+    }
+
+    cancelFollowUpRunsForChat(chatId, reason = 'cancelled') {
+        const now = Date.now();
+        const result = db.prepare(`
+            UPDATE followup_runs
+            SET status = ?, nextRunAt = NULL, updatedAt = ?
+            WHERE chatId = ? AND status IN ('active', 'waiting')
+        `).run(reason, now, chatId);
+        return result.changes;
+    }
+
+    listConversationsIdleSince(idleMinutes) {
+        const cutoff = Date.now() - Math.max(1, idleMinutes) * 60 * 1000;
+        const rows = db.prepare(`
+            SELECT c.chatId, c.phone, c.contactName, c.lastTs,
+                (SELECT fromMe FROM inbox_messages m WHERE m.chatId = c.chatId ORDER BY ts DESC LIMIT 1) AS lastFromMe
+            FROM inbox_conversations c
+            WHERE c.lastTs <= ?
+        `).all(cutoff);
+        return rows.filter((r) => r.lastFromMe === 1);
     }
 
     close() {

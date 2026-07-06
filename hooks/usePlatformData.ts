@@ -1,7 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import platformService from '../services/platformService';
 
 export function usePlatformKv<T>(key: string, fallback: T) {
+  const fallbackRef = useRef(fallback);
+  fallbackRef.current = fallback;
+
   const [value, setValue] = useState<T>(fallback);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -11,13 +14,13 @@ export function usePlatformKv<T>(key: string, fallback: T) {
     setError(null);
     try {
       const data = await platformService.getKv<T>(key);
-      setValue(data ?? fallback);
+      setValue(data ?? fallbackRef.current);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [key, fallback]);
+  }, [key]);
 
   useEffect(() => {
     refresh();

@@ -38,15 +38,15 @@ interface SettingsViewProps {
   syncing: boolean;
 }
 
-const TABS: { id: SettingsTab; label: string; icon: string }[] = [
-  { id: 'connections', label: 'Conexões', icon: 'fa-plug' },
-  { id: 'atendimento', label: 'Atendimento IA', icon: 'fa-robot' },
-  { id: 'integrations', label: 'Integrações', icon: 'fa-puzzle-piece' },
-  { id: 'users', label: 'Usuários', icon: 'fa-user-gear' },
-  { id: 'csat', label: 'Pesquisa CSAT', icon: 'fa-star' },
-  { id: 'api', label: 'API', icon: 'fa-code' },
-  { id: 'widget', label: 'Widget site', icon: 'fa-comment-dots' },
-  { id: 'profile', label: 'Perfil', icon: 'fa-user' },
+const TABS: { id: SettingsTab; label: string }[] = [
+  { id: 'connections', label: 'Conexões' },
+  { id: 'atendimento', label: 'Atendimento IA' },
+  { id: 'integrations', label: 'Integrações' },
+  { id: 'users', label: 'Usuários' },
+  { id: 'csat', label: 'Pesquisa CSAT' },
+  { id: 'api', label: 'API' },
+  { id: 'widget', label: 'Widget site' },
+  { id: 'profile', label: 'Perfil' },
 ];
 
 const SettingsView: React.FC<SettingsViewProps> = ({
@@ -63,34 +63,29 @@ const SettingsView: React.FC<SettingsViewProps> = ({
   onSync,
   syncing,
 }) => {
-  return (
-    <div className="animate-fadeIn flex flex-col lg:flex-row gap-6 lg:gap-8">
-      <aside className="lg:w-52 shrink-0">
-        <div className="mb-4 lg:hidden">
-          <h2 className="bs-page-title">Configurações</h2>
-          <p className="bs-page-desc">Conexões, integrações e API.</p>
-        </div>
-        <nav className="flex lg:flex-col gap-1 overflow-x-auto pb-1 lg:pb-0">
-          {TABS.map((t) => {
-            const active = tab === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => onTabChange(t.id)}
-                className={`shrink-0 flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm transition-colors whitespace-nowrap ${
-                  active ? 'bs-settings-tab-active' : 'bs-settings-tab'
-                }`}
-              >
-                <i className={`fa-solid ${t.icon} w-4 text-center text-xs ${active ? 'text-bs-accent' : 'text-bs-muted'}`} />
-                {t.label}
-              </button>
-            );
-          })}
-        </nav>
-      </aside>
+  const currentLabel = TABS.find((t) => t.id === tab)?.label
+    || (tab === 'woocommerce' ? 'WooCommerce' : tab === 'bling' ? 'Bling ERP' : 'Configurações');
 
-      <div className="flex-1 min-w-0">
+  return (
+    <div className="animate-fadeIn max-w-5xl">
+      <div className="mb-6 lg:hidden">
+        <h2 className="bs-page-title">Configurações</h2>
+        <label className="text-xs text-bs-muted mt-3 mb-1 block">Seção</label>
+        <select
+          className="bs-input text-sm"
+          value={tab === 'woocommerce' || tab === 'bling' ? 'integrations' : tab}
+          onChange={(e) => onTabChange(e.target.value as SettingsTab)}
+        >
+          {TABS.map((t) => (
+            <option key={t.id} value={t.id}>{t.label}</option>
+          ))}
+        </select>
+        {(tab === 'woocommerce' || tab === 'bling') && (
+          <p className="text-xs text-bs-muted mt-2">Agora: <span className="text-bs-text font-medium">{currentLabel}</span></p>
+        )}
+      </div>
+
+      <div className="min-w-0">
         {tab === 'connections' && (
           <WhatsAppConnection
             status={status}

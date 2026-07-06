@@ -138,7 +138,10 @@ const Sidebar: React.FC<SidebarProps> = ({
         {configOpen && (
           <div className="pb-1">
             {CONFIG_ITEMS.map((item) => {
-              const active = isSettingsView && settingsTab === item.id;
+              const active = isSettingsView && (
+                settingsTab === item.id
+                || (item.id === 'integrations' && (settingsTab === 'bling' || settingsTab === 'woocommerce'))
+              );
               return (
                 <button
                   key={item.id}

@@ -7,9 +7,12 @@ import Toggle from './Toggle';
 import IntegrationEventLog from './IntegrationEventLog';
 import { BRANDING } from '../config/branding';
 
+const INTEGRATIONS_FALLBACK: IntegrationConfig[] = [];
+
 const BLING_FALLBACK: BlingConfig = {
   connected: false,
   apiKey: '',
+  accessToken: '',
   syncProducts: true,
   syncOrders: true,
   notifyNfe: true,
@@ -17,79 +20,211 @@ const BLING_FALLBACK: BlingConfig = {
   statusMap: [],
 };
 
+const SETUP_STEPS = [
+  'No Bling: cadastre o app OAuth (developer.bling.com.br) com o Link de redirecionamento abaixo.',
+  'Adicione escopos: Pedidos de venda e Contatos (mínimo para WhatsApp).',
+  'Cole Client ID e Client Secret aqui → Salvar credenciais → Autorizar no Bling.',
+  'No Bling: Configurações → Webhooks → cadastre a URL de webhook (recurso: Pedido de venda).',
+  'Ative os status desejados na tabela e teste com Simular.',
+];
+
 interface BlingSettingsViewProps {
   onBack?: () => void;
 }
 
 const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
   const { showToast } = useToast();
-  const { value: cfg, loading } = usePlatformKv<BlingConfig>('bling', BLING_FALLBACK);
-  const { value: integrations, save: saveIntegrations } = usePlatformKv<IntegrationConfig[]>('integrations', []);
+  const { value: cfg, loading, refresh } = usePlatformKv<BlingConfig>('bling', BLING_FALLBACK);
+  const { value: integrations, save: saveIntegrations } = usePlatformKv<IntegrationConfig[]>('integrations', INTEGRATIONS_FALLBACK);
   const { events, refresh: refreshEvents } = useIntegrationEvents('bling');
   const [localCfg, setLocalCfg] = useState(cfg);
   const [webhookUrl, setWebhookUrl] = useState('');
+  const [tokenInput, setTokenInput] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [redirectUri, setRedirectUri] = useState(`${BRANDING.vpsUrl}/api/bling/oauth/callback`);
+  const [testPhone, setTestPhone] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [savingCreds, setSavingCreds] = useState(false);
+  const [authorizing, setAuthorizing] = useState(false);
+  const [testFeedback, setTestFeedback] = useState<{ ok: boolean; message: string } | null>(null);
+  const [simulateFeedback, setSimulateFeedback] = useState<string | null>(null);
 
   useEffect(() => setLocalCfg(cfg), [cfg]);
+  useEffect(() => {
+    const t = cfg.accessToken || cfg.apiKey || '';
+    if (t && !t.includes('demo') && !t.includes('•••')) setTokenInput(t);
+    if (cfg.clientId) setClientId(cfg.clientId);
+    if (cfg.clientSecret) setClientSecret(cfg.clientSecret);
+  }, [cfg]);
 
   useEffect(() => {
     platformService.getWebhookToken().then((token) => {
       setWebhookUrl(platformService.webhookUrl('bling', token));
     }).catch(() => {});
+    platformService.getBlingRedirectUri().then((r) => {
+      if (r.redirectUri) setRedirectUri(r.redirectUri);
+    }).catch(() => {});
   }, []);
 
   const persist = async (next: BlingConfig) => {
-    setLocalCfg(next);
     try {
-      await platformService.setKv('bling', next);
+      const saved = await platformService.setKv('bling', next);
+      setLocalCfg(saved);
+      await refresh();
+      return saved;
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Erro ao salvar', 'error');
+      throw e;
     }
   };
+
+  const isConnected = Boolean(
+    cfg.connected || cfg.tokenConfigured || localCfg.connected || localCfg.tokenConfigured,
+  );
 
   const save = async () => {
-    await persist(localCfg);
-    showToast('Configuração Bling salva.', 'success');
+    if (!tokenInput.trim() && (cfg.tokenConfigured || localCfg.tokenConfigured)) {
+      showToast('Token OAuth já está salvo no servidor.', 'info');
+      return;
+    }
+    if (!tokenInput.trim()) {
+      showToast('Cole o token ou use Autorizar no Bling.', 'error');
+      return;
+    }
+    await persist({ ...localCfg, connected: true, accessToken: tokenInput.trim(), apiKey: tokenInput.trim(), connectedAt: Date.now() });
+    showToast('Token Bling salvo.', 'success');
   };
 
-  const connectDemo = async () => {
-    const next: BlingConfig = {
-      ...localCfg,
-      connected: true,
-      apiKey: 'bling_••••••••demo',
-      connectedAt: Date.now(),
-    };
-    await persist(next);
-    if (integrations.length) {
-      await saveIntegrations(integrations.map((i) =>
-        i.id === 'bling' ? { ...i, connected: true, connectedAt: Date.now() } : i
-      ));
+  const copyWebhook = () => {
+    if (!webhookUrl) return;
+    navigator.clipboard.writeText(webhookUrl);
+    showToast('URL do webhook copiada!', 'success');
+  };
+
+  const copyRedirectUri = () => {
+    navigator.clipboard.writeText(redirectUri);
+    showToast('Link de redirecionamento copiado!', 'success');
+  };
+
+  const saveCredentials = async () => {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      showToast('Informe Client ID e Client Secret do app Bling.', 'error');
+      return;
     }
-    showToast('Bling ERP conectado em modo demo!', 'success');
+    setSavingCreds(true);
+    try {
+      const res = await platformService.saveBlingCredentials(clientId.trim(), clientSecret.trim());
+      if (res.redirectUri) setRedirectUri(res.redirectUri);
+      if (res.value) setLocalCfg(res.value);
+      await refresh();
+      showToast('Credenciais salvas no servidor.', 'success');
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Erro ao salvar credenciais', 'error');
+    } finally {
+      setSavingCreds(false);
+    }
+  };
+
+  const authorizeBling = async () => {
+    setAuthorizing(true);
+    try {
+      const res = await platformService.getBlingAuthorizeUrl();
+      window.open(res.url, '_blank', 'noopener,noreferrer');
+      showToast('Autorize no Bling. Esta página atualiza sozinha quando conectar.', 'info');
+      const started = Date.now();
+      const poll = window.setInterval(async () => {
+        if (Date.now() - started > 120000) {
+          window.clearInterval(poll);
+          return;
+        }
+        try {
+          const latest = await platformService.getKv<BlingConfig>('bling');
+          if (latest?.tokenConfigured || (latest?.connected && !String(latest.apiKey || '').includes('demo'))) {
+            window.clearInterval(poll);
+            await refresh();
+            showToast('Bling conectado com sucesso!', 'success');
+          }
+        } catch {
+          /* ignore poll errors */
+        }
+      }, 2500);
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Erro ao gerar link de autorização', 'error');
+    } finally {
+      setAuthorizing(false);
+    }
+  };
+
+  const testConnection = async () => {
+    const manual = tokenInput.trim();
+    setTesting(true);
+    setTestFeedback(null);
+    try {
+      const res = await platformService.testBlingConnection(manual || undefined);
+      const message = res.message || 'Conexão OK!';
+      setTestFeedback({ ok: true, message });
+      showToast(message, 'success');
+      await refresh();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Falha na conexão';
+      setTestFeedback({ ok: false, message });
+      showToast(message, 'error');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const connectBling = async () => {
+    if (!tokenInput.trim()) {
+      showToast('Cole o token OAuth do Bling.', 'error');
+      return;
+    }
+    setConnecting(true);
+    try {
+      const res = await platformService.connectBling(tokenInput.trim());
+      await persist({
+        ...localCfg,
+        connected: true,
+        accessToken: tokenInput.trim(),
+        apiKey: tokenInput.trim(),
+        connectedAt: Date.now(),
+      });
+      if (integrations.length) {
+        await saveIntegrations(integrations.map((i) =>
+          i.id === 'bling' ? { ...i, connected: true, connectedAt: Date.now() } : i
+        ));
+      }
+      showToast(res.message || 'Bling conectado!', 'success');
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Erro ao conectar', 'error');
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const simulateStatus = async (blingStatus: string) => {
+    const phone = testPhone.replace(/\D/g, '') || '5562988885555';
+    const nome = 'Cliente Teste';
+    setSimulateFeedback(null);
     try {
-      await platformService.simulateIntegrationEvent('bling', `pedido.${blingStatus.toLowerCase().replace(/\s/g, '_')}`, {
+      const event = await platformService.simulateIntegrationEvent('bling', `pedido.${blingStatus.toLowerCase().replace(/\s/g, '_')}`, {
         numero: '7821',
         situacao: blingStatus,
-        contato: { nome: 'Cliente Bling Demo', telefone: '5562988885555' },
-      });
+        contato: { nome, telefone: phone },
+      }) as { status?: string; whatsappPreview?: string };
       await refreshEvents();
-      showToast(`Evento Bling "${blingStatus}" simulado.`, 'info');
+      const sent = event?.status === 'processed';
+      const msg = sent
+        ? `WhatsApp enviado para ${testPhone ? 'seu número' : 'número demo'} — status "${blingStatus}".`
+        : `Evento "${blingStatus}" registrado (sem envio WhatsApp — confira se o status está ativo e syncOrders ligado).`;
+      setSimulateFeedback(msg);
+      showToast(msg, sent ? 'success' : 'info');
     } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Erro ao simular', 'error');
-    }
-  };
-
-  const syncNow = async () => {
-    try {
-      await platformService.simulateIntegrationEvent('bling', 'sync.produtos', {
-        summary: 'Sync manual — 142 produtos',
-      });
-      await refreshEvents();
-      showToast('Sincronização simulada com sucesso.', 'success');
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : 'Erro', 'error');
+      const message = e instanceof Error ? e.message : 'Erro ao simular';
+      setSimulateFeedback(message);
+      showToast(message, 'error');
     }
   };
 
@@ -111,44 +246,122 @@ const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
           <div className="w-12 h-12 rounded-xl bg-green-600/15 border border-green-600/30 flex items-center justify-center text-green-600 font-bold text-sm">bling</div>
           <div>
             <h2 className="bs-page-title">Bling ERP</h2>
-            <p className="bs-page-desc mt-0.5">Pedidos, NF-e, estoque e rastreio → WhatsApp.</p>
+            <p className="bs-page-desc mt-0.5">Pedidos, NF-e e rastreio → WhatsApp automático.</p>
           </div>
         </div>
-        {localCfg.connected ? (
+        {isConnected ? (
           <span className="bs-badge-success normal-case shrink-0">Conectado</span>
         ) : (
-          <button type="button" onClick={connectDemo} className="bs-btn text-sm px-4 py-2 shrink-0">
-            Conectar (demo)
+          <button type="button" onClick={connectBling} disabled={connecting} className="bs-btn text-sm px-4 py-2 shrink-0">
+            {connecting ? 'Conectando…' : 'Conectar Bling'}
           </button>
         )}
       </div>
 
+      <div className="bs-card p-4 border border-bs-border bg-bs-elevated/50">
+        <p className="text-sm font-semibold text-bs-text mb-2">Como configurar</p>
+        <ol className="text-xs text-bs-muted list-decimal list-inside space-y-1.5">
+          {SETUP_STEPS.map((step, i) => (
+            <li key={i}>{step}</li>
+          ))}
+        </ol>
+      </div>
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bs-section space-y-4">
-          <h3 className="bs-section-title">API Bling v3</h3>
+          <h3 className="bs-section-title">App OAuth no Bling</h3>
           <div>
-            <label className="text-xs text-bs-muted mb-1 block">API Key</label>
-            <input className="bs-input font-mono text-sm" placeholder="Sua chave API do Bling" value={localCfg.apiKey} onChange={(e) => setLocalCfg({ ...localCfg, apiKey: e.target.value })} />
+            <label className="text-xs text-bs-muted mb-1 block">Link de redirecionamento (cole no cadastro do app)</label>
+            <pre className="bg-bs-elevated border border-bs-border rounded-lg px-3 py-2 text-[10px] font-mono text-bs-text overflow-x-auto whitespace-pre-wrap break-all">{redirectUri}</pre>
+            <button type="button" onClick={copyRedirectUri} className="bs-link-accent text-xs mt-2">
+              Copiar link de redirecionamento
+            </button>
           </div>
-          <p className="text-xs text-bs-muted">
-            Obtenha em <span className="text-bs-accent">bling.com.br → Configurações → API</span>
-          </p>
-          {webhookUrl && (
+          <div className="grid grid-cols-1 gap-3">
             <div>
-              <label className="text-xs text-bs-muted mb-1 block">Webhook URL</label>
-              <pre className="bg-bs-elevated border border-bs-border rounded-lg px-3 py-2 text-[10px] font-mono text-bs-text overflow-x-auto">{webhookUrl}</pre>
+              <label className="text-xs text-bs-muted mb-1 block">Client ID</label>
+              <input
+                className="bs-input font-mono text-sm"
+                placeholder="ID do aplicativo Bling"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                autoComplete="off"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-bs-muted mb-1 block">Client Secret</label>
+              <input
+                className="bs-input font-mono text-sm"
+                placeholder="Segredo do aplicativo"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                type="password"
+                autoComplete="off"
+              />
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={saveCredentials} disabled={savingCreds} className="bs-btn-secondary text-sm">
+              {savingCreds ? 'Salvando…' : 'Salvar credenciais'}
+            </button>
+            <button type="button" onClick={authorizeBling} disabled={authorizing} className="bs-btn text-sm">
+              {authorizing ? 'Abrindo…' : 'Autorizar no Bling'}
+            </button>
+            <button type="button" onClick={testConnection} disabled={testing} className="bs-btn-secondary text-sm">
+              {testing ? 'Testando…' : 'Testar conexão'}
+            </button>
+          </div>
+          {testFeedback && (
+            <div className={`text-sm rounded-lg px-3 py-2 border ${testFeedback.ok ? 'border-green-600/40 bg-green-600/10 text-green-700 dark:text-green-400' : 'border-red-600/40 bg-red-600/10 text-red-700 dark:text-red-400'}`}>
+              {testFeedback.ok ? '✓ ' : '✗ '}{testFeedback.message}
             </div>
           )}
-          <button type="button" onClick={save} className="bs-btn text-sm">Salvar</button>
+          <p className="text-xs text-bs-muted">
+            Crie o app em{' '}
+            <a href="https://developer.bling.com.br" target="_blank" rel="noreferrer" className="text-bs-accent underline">
+              developer.bling.com.br
+            </a>
+            . Escopos mínimos: <strong>Pedidos de venda</strong> e <strong>Contatos</strong>.
+          </p>
+        </div>
+
+        <div className="bs-section space-y-4">
+          <h3 className="bs-section-title">Token manual (opcional)</h3>
+          <div>
+            <label className="text-xs text-bs-muted mb-1 block">Token de acesso (Bearer)</label>
+            <input
+              className="bs-input font-mono text-sm"
+              placeholder="Ou cole o access_token manualmente"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              type="password"
+              autoComplete="off"
+            />
+          </div>
+          <p className="text-xs text-bs-muted">
+            Usado para buscar dados completos do pedido quando o webhook chega só com o ID.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={save} className="bs-btn-secondary text-sm">Salvar token</button>
+          </div>
+          {webhookUrl && (
+            <div>
+              <label className="text-xs text-bs-muted mb-1 block">Webhook URL (cadastre no Bling)</label>
+              <pre className="bg-bs-elevated border border-bs-border rounded-lg px-3 py-2 text-[10px] font-mono text-bs-text overflow-x-auto whitespace-pre-wrap break-all">{webhookUrl}</pre>
+              <button type="button" onClick={copyWebhook} className="bs-link-accent text-xs mt-2">
+                Copiar URL
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="bs-section space-y-3">
           <h3 className="bs-section-title">Sincronização</h3>
           {([
-            { key: 'syncProducts' as const, label: 'Sincronizar produtos', desc: 'Catálogo para Agente IA' },
-            { key: 'syncOrders' as const, label: 'Sincronizar pedidos', desc: 'Status em tempo real' },
-            { key: 'notifyNfe' as const, label: 'Avisar NF-e autorizada', desc: 'WhatsApp ao emitir nota' },
-            { key: 'notifyLowStock' as const, label: 'Alerta estoque baixo', desc: 'Grupo ADM interno' },
+            { key: 'syncProducts' as const, label: 'Sincronizar produtos', desc: 'Catálogo para Agente IA (em breve)' },
+            { key: 'syncOrders' as const, label: 'WhatsApp em mudança de pedido', desc: 'Envia mensagem ao cliente' },
+            { key: 'notifyNfe' as const, label: 'Avisar NF-e autorizada', desc: 'Status NF-e na tabela abaixo' },
+            { key: 'notifyLowStock' as const, label: 'Alerta estoque baixo', desc: 'Grupo ADM interno (em breve)' },
           ]).map((opt) => (
             <div key={opt.key} className="flex items-center justify-between gap-3">
               <div>
@@ -165,9 +378,16 @@ const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
               />
             </div>
           ))}
-          <button type="button" onClick={syncNow} className="bs-btn-secondary text-xs py-2 w-full mt-2">
-            <i className="fa-solid fa-arrows-rotate mr-1" />Sincronizar agora (demo)
-          </button>
+          <div className="pt-2 border-t border-bs-border">
+            <label className="text-xs text-bs-muted mb-1 block">Telefone para testes (Simular)</label>
+            <input
+              className="bs-input py-1.5 text-sm font-mono"
+              placeholder="5511999999999 (opcional)"
+              value={testPhone}
+              onChange={(e) => setTestPhone(e.target.value)}
+            />
+            <p className="text-[10px] text-bs-muted mt-1">Se vazio, usa número demo. Com seu número, o WhatsApp recebe a mensagem de teste.</p>
+          </div>
         </div>
       </div>
 
@@ -222,6 +442,14 @@ const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
             ))}
           </tbody>
         </table>
+        <p className="text-[10px] text-bs-muted px-4 py-2 border-t border-bs-border">
+          Variáveis: {'{{nome}}'}, {'{{numero}}'}, {'{{rastreio}}'}
+        </p>
+        {simulateFeedback && (
+          <p className="text-xs px-4 py-2 border-t border-bs-border text-bs-text bg-bs-elevated/60">
+            {simulateFeedback}
+          </p>
+        )}
       </div>
 
       <div className="bs-card p-4 border-dashed">
