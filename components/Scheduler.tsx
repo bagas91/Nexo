@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ChatEntity, ScheduledMessage, FileAttachment, Category, View, BulkSendResult, MediaLayout } from '../types';
 import { BackendService } from '../services/backendService';
 import { useToast } from '../contexts/ToastContext';
-import { getAttachmentMaxBytes, getAttachmentLimitLabel } from '../utils/attachmentLimits';
+import { getAttachmentMaxBytes, getAttachmentLimitLabel, hasVideoAttachment, isVideoAttachment, VIDEO_DISPATCH_WARNING } from '../utils/attachmentLimits';
 
 interface SchedulerProps {
   chats: ChatEntity[];
@@ -127,6 +127,9 @@ const Scheduler: React.FC<SchedulerProps> = ({ chats, onSchedule, setView }) => 
       });
       reader.readAsDataURL(file);
       newAttachments.push(await filePromise);
+    }
+    if (newAttachments.some(isVideoAttachment)) {
+      showToast(VIDEO_DISPATCH_WARNING, 'info');
     }
     setAttachments(prev => [...prev, ...newAttachments]);
   };
@@ -388,7 +391,7 @@ const Scheduler: React.FC<SchedulerProps> = ({ chats, onSchedule, setView }) => 
               <div className="mt-4">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-sm font-semibold text-bs-muted">Anexos ({attachments.length})</span>
-                  <span className="text-[10px] text-bs-subtle hidden sm:inline">Imagem/PDF 10 MB · Vídeo 32 MB · Áudio 20 MB</span>
+                  <span className="text-[10px] text-bs-subtle hidden sm:inline">Imagem/PDF 10 MB · Áudio 20 MB · Vídeo 32 MB (evitar em massa)</span>
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -406,6 +409,19 @@ const Scheduler: React.FC<SchedulerProps> = ({ chats, onSchedule, setView }) => 
                     accept="image/*,video/*,audio/*,application/pdf"
                   />
                 </div>
+
+                {hasVideoAttachment(attachments) && (
+                  <div className="mb-3 rounded-lg border border-amber-400/50 bg-amber-500/10 px-3 py-2.5 text-xs text-amber-900 dark:text-amber-200">
+                    <p className="font-semibold">
+                      <i className="fa-solid fa-triangle-exclamation mr-1.5" />
+                      Vídeo anexado — risco de travar a sessão
+                    </p>
+                    <p className="mt-1 text-bs-muted dark:text-amber-200/80">
+                      Para Palavra do Dia e disparo em vários grupos, use <strong>imagem + áudio + texto</strong>.
+                      Vídeo só em teste ou poucos destinos. Link do YouTube/Reels no texto é mais seguro.
+                    </p>
+                  </div>
+                )}
 
                 {attachments.length > 0 && (
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

@@ -83,6 +83,9 @@ function estimateMediaTimeoutMs(file) {
     const raw = file.data || '';
     const base64 = raw.includes(',') ? raw.split(',')[1] : raw;
     const bytes = base64 ? Math.floor((base64.length * 3) / 4) : 0;
+    const isVideo = String(file.type || '').startsWith('video/')
+        || /\.(mp4|mov|webm|mkv|avi)$/i.test(String(file.name || ''));
+    if (isVideo && bytes > 10 * 1024 * 1024) return Math.max(MEDIA_SEND_TIMEOUT_MS, 600000);
     if (bytes > 5 * 1024 * 1024) return Math.max(MEDIA_SEND_TIMEOUT_MS, 300000);
     if (bytes > 1 * 1024 * 1024) return Math.max(MEDIA_SEND_TIMEOUT_MS, 180000);
     return MEDIA_SEND_TIMEOUT_MS;
@@ -316,7 +319,7 @@ class WhatsAppClient {
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
                 ],
-                protocolTimeout: Number(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS) || 180000
+                protocolTimeout: Number(process.env.PUPPETEER_PROTOCOL_TIMEOUT_MS) || 300000
             }
         };
         if (pairingPhone) {
@@ -418,11 +421,49 @@ class WhatsAppClient {
 
             setTimeout(() => {
                 if (this.isReady && this.client) {
-                    syncRecentInbox(this.client).catch((err) => {
+                    syncRecentInbox(this.client, {
+                        chatLimit: 25,
+                        messageLimit: 15,
+                        skipMedia: true,
+                        skipAvatars: true,
+                        triggerAgentForRecentMs: 15 * 60 * 1000,
+                    }).catch((err) => {
                         logger.warn('Inbox: sync inicial falhou', err?.message || err);
                     });
                 }
-            }, 8000);
+            }, 12000);
+
+            // Poll leve: eventos message_* às vezes param após carga do Chrome; sync aciona o agente
+            if (this.inboxSyncInterval) clearInterval(this.inboxSyncInterval);
+            this.inboxSyncInterval = setInterval(() => {
+                if (this.isReady && this.client) {
+                    syncRecentInbox(this.client, {
+                        chatLimit: 12,
+                        messageLimit: 6,
+                        skipMedia: true,
+                        skipAvatars: true,
+                        triggerAgentForRecentMs: 10 * 60 * 1000,
+                    }).catch((err) => {
+                        logger.warn('Inbox: sync periódico (leve) falhou', err?.message || err);
+                    });
+                }
+            }, 30 * 1000);
+
+            // Sync completo (mídia/avatar) bem mais espaçado — não compete com o atendimento
+            if (this.inboxHeavySyncInterval) clearInterval(this.inboxHeavySyncInterval);
+            this.inboxHeavySyncInterval = setInterval(() => {
+                if (this.isReady && this.client) {
+                    syncRecentInbox(this.client, {
+                        chatLimit: 30,
+                        messageLimit: 20,
+                        skipMedia: false,
+                        skipAvatars: false,
+                        triggerAgentForRecentMs: 0,
+                    }).catch((err) => {
+                        logger.warn('Inbox: sync pesado falhou', err?.message || err);
+                    });
+                }
+            }, 15 * 60 * 1000);
 
             notifier.notifyOnce(
                 'whatsapp-back-online',
@@ -529,6 +570,16 @@ class WhatsAppClient {
                 await persistInboxMessage(msg);
             } catch (err) {
                 logger.warn('Inbox: erro ao registrar mensagem', err?.message || err);
+            }
+        });
+
+        // Backup: em algumas sessões o message_create falha/atrasa; `message` cobre só entrantes
+        this.client.on('message', async (msg) => {
+            if (clientEpoch !== this._clientEpoch || !this.isReady) return;
+            try {
+                await persistInboxMessage(msg);
+            } catch (err) {
+                logger.warn('Inbox: erro ao registrar mensagem (event message)', err?.message || err);
             }
         });
 
@@ -1237,7 +1288,8 @@ class WhatsAppClient {
     async sendAttachment(chatId, file, caption, sendOpts) {
         let uploadFile = file;
         const isAudio = isAudioFile(file);
-        if (isAudio) {
+        const alreadyPrepared = !!(sendOpts && sendOpts.attachmentsPrepared);
+        if (isAudio && !alreadyPrepared) {
             uploadFile = await normalizeAudioForWhatsApp(file);
         }
 
@@ -1256,9 +1308,10 @@ class WhatsAppClient {
         let lastErr;
         for (let i = 0; i < strategies.length; i++) {
             try {
+                const { attachmentsPrepared: _prepared, ...waOpts } = sendOpts || {};
                 const opts = {
                     ...(caption ? { caption } : {}),
-                    ...sendOpts,
+                    ...waOpts,
                     ...strategies[i]
                 };
                 const strategyLabel = Object.keys(strategies[i]).length
@@ -1321,7 +1374,10 @@ class WhatsAppClient {
                 chatName = targetChat ? targetChat.name : 'Desconhecido';
             }
             const isChannel = targetChat?.type === 'channel';
-            const sendOpts = isChannel ? { sendSeen: false } : {};
+            const sendOpts = {
+                ...(isChannel ? { sendSeen: false } : {}),
+                ...(options.attachmentsPrepared ? { attachmentsPrepared: true } : {}),
+            };
             const originalText = text; // Preserva o texto original para o histórico
 
             const startedAt = new Date();

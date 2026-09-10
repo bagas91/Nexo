@@ -103,6 +103,7 @@ export class BackendService {
     pairingPhone?: string;
     sendInProgress?: boolean;
     chatsSyncInProgress?: boolean;
+    dispatchPaused?: boolean;
   }> {
     try {
       const res = await fetch(`${API_BASE}/status`, { headers: this.headers() });
@@ -115,10 +116,11 @@ export class BackendService {
         pairingCode: data.pairingCode,
         pairingPhone: data.pairingPhone,
         sendInProgress,
-        chatsSyncInProgress: !!data.chatsSyncInProgress
+        chatsSyncInProgress: !!data.chatsSyncInProgress,
+        dispatchPaused: !!data.dispatchPaused,
       };
     } catch (err) {
-      return { status: ConnectionStatus.DISCONNECTED, sendInProgress: false };
+      return { status: ConnectionStatus.DISCONNECTED, sendInProgress: false, dispatchPaused: false };
     }
   }
 
@@ -136,6 +138,27 @@ export class BackendService {
     } catch {
       return this.emptySendProgress();
     }
+  }
+
+  async stopAllDispatches(): Promise<{ success: boolean; paused?: number; sendingStopped?: number }> {
+    const res = await fetch(`${API_BASE}/dispatch/stop-all`, {
+      method: 'POST',
+      headers: this.headers(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao parar disparos');
+    return data as { success: boolean; paused?: number; sendingStopped?: number };
+  }
+
+  async resumeDispatches(opts?: { unpauseSchedules?: boolean }): Promise<{ success: boolean; unpaused?: number }> {
+    const res = await fetch(`${API_BASE}/dispatch/resume`, {
+      method: 'POST',
+      headers: this.headers(true),
+      body: JSON.stringify({ unpauseSchedules: !!opts?.unpauseSchedules }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao reativar disparos');
+    return data as { success: boolean; unpaused?: number };
   }
 
   private emptySendProgress(): SendProgressState {
@@ -692,7 +715,14 @@ export class BackendService {
     return data.users || [];
   }
 
-  async createUser(params: { email: string; password: string; name: string; role?: string }): Promise<User> {
+  async createUser(params: {
+    email: string;
+    password: string;
+    name: string;
+    role?: string;
+    modules?: string[];
+    phone?: string | null;
+  }): Promise<User> {
     const res = await fetch(`${API_BASE}/users`, {
       method: 'POST',
       headers: this.headers(true),
@@ -703,7 +733,14 @@ export class BackendService {
     return data.user;
   }
 
-  async updateUser(id: string, patch: { name?: string; password?: string; role?: string; active?: boolean }): Promise<User> {
+  async updateUser(id: string, patch: {
+    name?: string;
+    password?: string;
+    role?: string;
+    active?: boolean;
+    modules?: string[];
+    phone?: string | null;
+  }): Promise<User> {
     const res = await fetch(`${API_BASE}/users/${id}`, {
       method: 'PATCH',
       headers: this.headers(true),
@@ -711,6 +748,64 @@ export class BackendService {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Falha ao atualizar usuário');
+    return data.user;
+  }
+
+  async deleteUser(id: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/users/${id}`, {
+      method: 'DELETE',
+      headers: this.headers(true)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao excluir usuário');
+  }
+
+  // --- Admin controle ---
+  async getAdminHealth() {
+    const res = await fetch(`${API_BASE}/admin/health`, { headers: this.headers() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao carregar saúde');
+    return data;
+  }
+
+  async getAdminAccess() {
+    const res = await fetch(`${API_BASE}/admin/access`, { headers: this.headers() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao carregar acessos');
+    return data as { modules: Array<{ id: string; label: string; groupLabel: string }>; users: User[] };
+  }
+
+  async getAdminAudit(params?: { action?: string; limit?: number; offset?: number }) {
+    const q = new URLSearchParams();
+    if (params?.action) q.set('action', params.action);
+    if (params?.limit) q.set('limit', String(params.limit));
+    if (params?.offset) q.set('offset', String(params.offset));
+    const qs = q.toString();
+    const res = await fetch(`${API_BASE}/admin/audit${qs ? `?${qs}` : ''}`, { headers: this.headers() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao carregar auditoria');
+    return data as { rows: Array<Record<string, unknown>>; total: number; limit: number; offset: number };
+  }
+
+  async adminForceLogout(id: string): Promise<User> {
+    const res = await fetch(`${API_BASE}/admin/users/${encodeURIComponent(id)}/force-logout`, {
+      method: 'POST',
+      headers: this.headers(true),
+      body: '{}',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao encerrar sessão');
+    return data.user;
+  }
+
+  async adminResetPassword(id: string, password: string): Promise<User> {
+    const res = await fetch(`${API_BASE}/admin/users/${encodeURIComponent(id)}/reset-password`, {
+      method: 'POST',
+      headers: this.headers(true),
+      body: JSON.stringify({ password }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || 'Falha ao redefinir senha');
     return data.user;
   }
 
@@ -727,19 +822,51 @@ export class BackendService {
       status: string;
       mode: 'bot' | 'human';
       updatedAt: number;
+      avatarUrl: string | null;
+      needsHuman?: boolean;
+      humanAlertAt?: number | null;
+      notes?: string;
+      lastFromMe?: boolean | null;
+      unanswered?: boolean;
+      unseen?: boolean;
+      queueLabel?: string;
+      tags?: string[];
     }>;
   }
 
-  async getInboxMessages(chatId: string) {
-    const res = await fetch(`${API_BASE}/inbox/conversations/${encodeURIComponent(chatId)}/messages`, { headers: this.headers() });
-    const data = await res.json().catch(() => []);
+  async getInboxMessages(chatId: string, opts?: { before?: number; limit?: number }) {
+    const q = new URLSearchParams();
+    if (opts?.before) q.set('before', String(opts.before));
+    if (opts?.limit) q.set('limit', String(opts.limit));
+    const qs = q.toString() ? `?${q}` : '';
+    const res = await fetch(
+      `${API_BASE}/inbox/conversations/${encodeURIComponent(chatId)}/messages${qs}`,
+      { headers: this.headers() },
+    );
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao carregar mensagens');
-    return data as Array<{
-      id: string;
-      body: string;
-      fromMe: boolean;
-      ts: number;
-    }>;
+    // Compat: API nova { messages, hasMore } ou array legado
+    if (Array.isArray(data)) {
+      return { messages: data, hasMore: false, oldestTs: data[0]?.ts ?? null };
+    }
+    const payload = data as {
+      messages?: Array<{
+        id: string;
+        body: string;
+        fromMe: boolean;
+        ts: number;
+        mediaType: 'audio' | 'image' | 'video' | 'document' | null;
+        mimetype: string | null;
+        mediaUrl: string | null;
+      }>;
+      hasMore?: boolean;
+      oldestTs?: number | null;
+    };
+    return {
+      messages: payload.messages || [],
+      hasMore: !!payload.hasMore,
+      oldestTs: payload.oldestTs ?? null,
+    };
   }
 
   async markInboxRead(chatId: string) {
@@ -775,6 +902,28 @@ export class BackendService {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao alterar modo');
+    return data;
+  }
+
+  async setConversationStatus(chatId: string, status: 'open' | 'pending' | 'closed') {
+    const res = await fetch(`${API_BASE}/inbox/conversations/${encodeURIComponent(chatId)}/status`, {
+      method: 'POST',
+      headers: this.headers(true),
+      body: JSON.stringify({ status }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao alterar status');
+    return data;
+  }
+
+  async setConversationNotes(chatId: string, notes: string) {
+    const res = await fetch(`${API_BASE}/inbox/conversations/${encodeURIComponent(chatId)}/notes`, {
+      method: 'POST',
+      headers: this.headers(true),
+      body: JSON.stringify({ notes }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao salvar nota');
     return data;
   }
 }

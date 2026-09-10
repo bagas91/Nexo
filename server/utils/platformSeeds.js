@@ -47,32 +47,6 @@ const SEED_FLOWS = [
         createdAt: Date.now() - 86400000 * 2,
     },
     {
-        id: 'fl_woo_pos',
-        name: 'Woo — Confirmação de pedido',
-        active: true,
-        trigger: 'Webhook WooCommerce',
-        triggerConfig: { event: 'order.created' },
-        blocks: [{
-            id: 'b1',
-            type: 'message',
-            label: 'Confirmação',
-            config: { text: `Olá {{nome}}! Recebemos seu pedido #{{numero}}. Obrigada pela compra na ${BRANDING.storeName}!` },
-        }],
-        createdAt: Date.now() - 86400000,
-    },
-    {
-        id: 'fl_woo_cart',
-        name: 'Woo — Carrinho abandonado',
-        active: true,
-        trigger: 'Webhook WooCommerce',
-        triggerConfig: { event: 'cart.abandoned' },
-        blocks: [
-            { id: 'b1', type: 'delay', label: 'Esperar 1h', config: { minutes: '60' } },
-            { id: 'b2', type: 'message', label: 'Recuperação', config: { text: 'Oi {{nome}}! Vi que você deixou itens no carrinho. Posso ajudar com o pedido?' } },
-        ],
-        createdAt: Date.now() - 86400000,
-    },
-    {
         id: 'fl_bling_env',
         name: 'Bling — Pedido enviado',
         active: true,
@@ -95,8 +69,26 @@ const SEED_CONVERSATIONS = [
 ];
 
 const SEED_DEALS = [
-    { id: 'd1', title: 'Combo Florescer', contactName: 'Ana Compras', stage: 'proposal', value: 349, updatedAt: Date.now() - 3600000 },
-    { id: 'd2', title: 'Pedido oração', contactName: 'Maria Silva', stage: 'lead', value: 0, updatedAt: Date.now() - 7200000 },
+    {
+        id: 'd1',
+        title: 'Combo Florescer',
+        contactName: 'Ana Compras',
+        phone: '5511988882003',
+        stage: 'link_sent',
+        value: 349,
+        source: 'whatsapp',
+        updatedAt: Date.now() - 3600000,
+    },
+    {
+        id: 'd2',
+        title: 'Ajuda no checkout — Colar',
+        contactName: 'Maria Silva',
+        phone: '5562999991001',
+        stage: 'attending',
+        value: 0,
+        source: 'whatsapp',
+        updatedAt: Date.now() - 7200000,
+    },
 ];
 
 const SEED_CAMPAIGNS = [
@@ -105,16 +97,6 @@ const SEED_CAMPAIGNS = [
 ];
 
 const SEED_INTEGRATION_EVENTS = [
-    {
-        source: 'woocommerce',
-        eventType: 'order.completed',
-        summary: 'Pedido #4821 — Combo Florescer R$ 349',
-        customer: 'Ana Compras',
-        phone: '+55 11 98888-2003',
-        status: 'processed',
-        whatsappPreview: 'Olá Ana! Seu pedido #4821 foi confirmado. Em breve você recebe o rastreio.',
-        ts: Date.now() - 3600000,
-    },
     {
         source: 'bling',
         eventType: 'pedido.enviado',

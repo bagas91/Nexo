@@ -211,8 +211,12 @@ const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
     try {
       const event = await platformService.simulateIntegrationEvent('bling', `pedido.${blingStatus.toLowerCase().replace(/\s/g, '_')}`, {
         numero: '7821',
+        total: 349.9,
         situacao: blingStatus,
         contato: { nome, telefone: phone },
+        itens: [
+          { descricao: 'Colar Mezuzah Premium', quantidade: 1, valor: 349.9 },
+        ],
       }) as { status?: string; whatsappPreview?: string };
       await refreshEvents();
       const sent = event?.status === 'processed';
@@ -443,7 +447,7 @@ const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
           </tbody>
         </table>
         <p className="text-[10px] text-bs-muted px-4 py-2 border-t border-bs-border">
-          Variáveis: {'{{nome}}'}, {'{{numero}}'}, {'{{rastreio}}'}
+          Variáveis: {'{{nome}}'}, {'{{numero}}'}, {'{{produtos}}'}, {'{{primeiro_produto}}'}, {'{{quantidade}}'}, {'{{total}}'}, {'{{rastreio}}'}, {'{{status}}'}
         </p>
         {simulateFeedback && (
           <p className="text-xs px-4 py-2 border-t border-bs-border text-bs-text bg-bs-elevated/60">
@@ -455,8 +459,8 @@ const BlingSettingsView: React.FC<BlingSettingsViewProps> = ({ onBack }) => {
       <div className="bs-card p-4 border-dashed">
         <p className="text-sm font-semibold text-bs-text mb-1">Fluxo recomendado {BRANDING.productName}</p>
         <p className="text-xs text-bs-muted leading-relaxed">
-          <strong>WooCommerce</strong> confirma pedido no site → <strong>Bling</strong> assume logística (NF, rastreio, entrega).
-          Evita mensagens duplicadas: Woo para marketing inicial, Bling para operação.
+          <strong>Bling</strong> é a fonte dos pedidos: vitrine no site, operação e WhatsApp pelo ERP (NF, rastreio, entrega).
+          Cadastre mensagens por status para substituir o texto genérico de atualização.
         </p>
       </div>
 

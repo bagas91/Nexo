@@ -17,6 +17,7 @@
     "restore:session": "./scripts/restore-session.sh",
     "backup:session": "curl -X POST http://localhost:3001/api/session/backup",
     "pm2:start": "pm2 start ecosystem.config.cjs",
+    "pm2:reload": "pm2 reload zapflow-backend --kill-timeout 30000",
     "pm2:restart": "pm2 restart zapflow-backend --kill-timeout 30000",
     "pm2:stop": "pm2 stop zapflow-backend",
     "fix:browser-lock": "bash scripts/fix-browser-lock.sh",

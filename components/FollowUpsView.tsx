@@ -15,8 +15,7 @@ const MODELS: FeatureModel[] = [
 ];
 
 const ECOMMERCE_MODELS: FeatureModel[] = [
-  { id: 'ecom_confirm', title: 'Confirmação de pedido', description: 'Woo/Bling — confirma compra + suporte 1h depois.', icon: 'fa-bag-shopping', tag: 'Loja' },
-  { id: 'ecom_cart', title: 'Carrinho abandonado', description: 'Woo — lembrete 30min e 24h depois.', icon: 'fa-cart-shopping', tag: 'Loja' },
+  { id: 'ecom_confirm', title: 'Confirmação de pedido', description: 'Bling — ao criar pedido + suporte 1h depois.', icon: 'fa-bag-shopping', tag: 'Loja' },
   { id: 'ecom_post', title: 'Pós-entrega', description: 'Bling — feedback 24h após entrega + recompra.', icon: 'fa-truck-fast', tag: 'Loja' },
 ];
 
@@ -106,18 +105,11 @@ const FollowUpsView: React.FC = () => {
       wait.config = { minutes: '1440' };
       payload = { id: `fu_${Date.now()}`, name: m.title, active: false, trigger: 'Reengajamento', steps: [wait, newStep('message')], createdAt: Date.now() };
     } else if (m.id === 'ecom_confirm') {
-      payload = { id: `fu_${Date.now()}`, name: m.title, active: false, trigger: 'Confirmação Woo', steps: [newStep('message'), newStep('tag'), newStep('wait'), newStep('message')], createdAt: Date.now() };
+      payload = { id: `fu_${Date.now()}`, name: m.title, active: false, trigger: 'Pedido criado (Bling)', steps: [newStep('message'), newStep('tag'), newStep('wait'), newStep('message')], createdAt: Date.now() };
       payload.steps[0].config = { text: 'Olá {{name}}! 🛍️ Recebemos seu pedido. Em breve você recebe a confirmação de pagamento.' };
       payload.steps[1].config = { tag: 'cliente-loja' };
       payload.steps[2].config = { minutes: '60' };
       payload.steps[3].config = { text: 'Qualquer dúvida sobre pagamento ou entrega, responda aqui!' };
-    } else if (m.id === 'ecom_cart') {
-      const w1 = newStep('wait'); w1.config = { minutes: '30' };
-      const w2 = newStep('wait'); w2.config = { minutes: '1440' };
-      const msg1 = newStep('message'); msg1.config = { text: 'Oi {{name}}! Vi que você deixou itens no carrinho. Posso ajudar a finalizar?' };
-      const msg2 = newStep('message'); msg2.config = { text: 'Ainda dá tempo! Responda SIM que te envio o link. 😊' };
-      const tag = newStep('tag'); tag.config = { tag: 'carrinho-abandonado' };
-      payload = { id: `fu_${Date.now()}`, name: m.title, active: false, trigger: 'Carrinho Woo', steps: [w1, msg1, w2, msg2, tag], createdAt: Date.now() };
     } else if (m.id === 'ecom_post') {
       const w1 = newStep('wait'); w1.config = { minutes: '1440' };
       const w2 = newStep('wait'); w2.config = { minutes: '4320' };
@@ -216,16 +208,16 @@ const FollowUpsView: React.FC = () => {
 
       <div>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-3">
-          <h3 className="text-sm font-bold text-bs-text uppercase tracking-wide">E-commerce (Woo / Bling)</h3>
+          <h3 className="text-sm font-bold text-bs-text uppercase tracking-wide">E-commerce (Bling)</h3>
           <button type="button" onClick={installEcommercePack} className="bs-btn-secondary text-sm px-4 py-2 shrink-0">
             <i className="fa-solid fa-download mr-2" />
             Instalar pacote completo
           </button>
         </div>
         <p className="text-xs text-bs-muted mb-3">
-          Instale os 3 modelos de uma vez ou adicione individualmente. Depois, ative cada um e configure os webhooks em Integrações.
+          Instale os modelos de uma vez ou adicione individualmente. Depois, ative cada um e configure o Bling em Integrações.
         </p>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {ECOMMERCE_MODELS.map((m) => (
             <button key={m.id} type="button" onClick={() => useModel(m)} className="bs-card p-4 text-left hover:border-bs-accent/40 transition-colors border-emerald-500/20">
               <i className={`fa-solid ${m.icon} text-emerald-600 dark:text-emerald-400 mb-2`} />
@@ -246,7 +238,7 @@ const FollowUpsView: React.FC = () => {
               <strong>contém:palavra</strong> — quando a mensagem incluir a palavra.{' '}
               <strong>Manual</strong> — só via botão Testar abaixo.{' '}
               <strong>Reengajamento</strong> — após X min sem resposta (usa o passo &quot;Esperar&quot;).{' '}
-              <strong>Pedido Bling/Woo</strong> — webhook de integração.
+              <strong>Pedido Bling</strong> — webhook de integração (ex.: Pedido criado, Pedido entregue).
             </p>
             <div className="flex items-center gap-3">
               <span className="text-sm text-bs-muted">Ativo</span>

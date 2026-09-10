@@ -24,6 +24,8 @@ const Dashboard: React.FC<DashboardProps> = ({ chats, schedules, backend, onRefr
   const [messagesToday, setMessagesToday] = useState<number>(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [sendInProgress, setSendInProgress] = useState(false);
+  const [dispatchPaused, setDispatchPaused] = useState(false);
+  const [dispatchBusy, setDispatchBusy] = useState(false);
   const [chartPeriod, setChartPeriod] = useState<ChartPeriod>(7);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const { showToast } = useToast();
@@ -91,13 +93,53 @@ const Dashboard: React.FC<DashboardProps> = ({ chats, schedules, backend, onRefr
   useEffect(() => {
     if (!backend) return;
     const poll = async () => {
-      const { sendInProgress: busy } = await backend.getStatus();
+      const { sendInProgress: busy, dispatchPaused: paused } = await backend.getStatus();
       setSendInProgress(!!busy);
+      setDispatchPaused(!!paused);
     };
     poll();
     const id = window.setInterval(poll, 2000);
     return () => window.clearInterval(id);
   }, [backend]);
+
+  const handleStopAll = async () => {
+    if (!backend) return;
+    if (!confirm('Parar todos os disparos? Agendamentos pendentes serão pausados e o envio em andamento será cancelado.')) return;
+    setDispatchBusy(true);
+    try {
+      const r = await backend.stopAllDispatches();
+      setDispatchPaused(true);
+      await onRefreshSchedules?.();
+      showToast(
+        `Parada de emergência ativa. ${r.paused || 0} agendamento(s) pausado(s).`,
+        'info',
+      );
+    } catch (e) {
+      showToast((e as Error)?.message || 'Erro ao parar disparos.', 'error');
+    } finally {
+      setDispatchBusy(false);
+    }
+  };
+
+  const handleResumeDispatches = async (unpauseSchedules = false) => {
+    if (!backend) return;
+    setDispatchBusy(true);
+    try {
+      const r = await backend.resumeDispatches({ unpauseSchedules });
+      setDispatchPaused(false);
+      await onRefreshSchedules?.();
+      showToast(
+        unpauseSchedules
+          ? `Disparos reativados. ${r.unpaused || 0} agendamento(s) voltaram para a fila.`
+          : 'Disparos reativados. Reative agendamentos pausados um a um, ou use “Reativar tudo”.',
+        'success',
+      );
+    } catch (e) {
+      showToast((e as Error)?.message || 'Erro ao reativar disparos.', 'error');
+    } finally {
+      setDispatchBusy(false);
+    }
+  };
 
   const uniqueSchedules = React.useMemo(() => {
     const map = new Map<string, ScheduledMessage>();
@@ -225,6 +267,55 @@ const Dashboard: React.FC<DashboardProps> = ({ chats, schedules, backend, onRefr
         <h2 className="bs-page-title">Visão Geral</h2>
         <p className="bs-page-desc mt-1">Hub de automação WhatsApp — fila e métricas.</p>
       </div>
+
+      {dispatchPaused && (
+        <div className="rounded-xl border border-amber-400/50 bg-amber-500/10 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-amber-800 dark:text-amber-200">
+              <i className="fa-solid fa-triangle-exclamation mr-2" />
+              Parada de emergência ativa
+            </p>
+            <p className="text-xs text-bs-muted mt-0.5">
+              Worker e envios em massa estão bloqueados. Checkpoint de agendamentos é preservado.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => void handleResumeDispatches(false)}
+              disabled={dispatchBusy || !backend}
+              className="bs-btn-secondary text-xs py-2 px-3"
+            >
+              {dispatchBusy ? '…' : 'Reativar disparos'}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!confirm('Reativar disparos E colocar todos os agendamentos pausados de volta na fila?')) return;
+                void handleResumeDispatches(true);
+              }}
+              disabled={dispatchBusy || !backend}
+              className="bs-btn text-xs py-2 px-3"
+            >
+              Reativar tudo
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!dispatchPaused && backend && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => void handleStopAll()}
+            disabled={dispatchBusy}
+            className="text-xs font-semibold px-3 py-2 rounded-md border border-rose-500/40 text-rose-700 dark:text-rose-300 hover:bg-rose-500/10 disabled:opacity-60"
+          >
+            <i className="fa-solid fa-hand mr-1.5" />
+            {dispatchBusy ? '…' : 'Parar disparos'}
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {stats.map((stat) => (

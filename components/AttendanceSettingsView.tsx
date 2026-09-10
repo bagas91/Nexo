@@ -19,6 +19,10 @@ export interface AttendanceConfig {
     end: string;
     timezone: string;
   };
+  idleHumanAlertEnabled: boolean;
+  idleHumanAlertMinutes: number;
+  idleHumanNotifyCustomer: boolean;
+  idleHumanCustomerMessage: string;
 }
 
 const FALLBACK: AttendanceConfig = {
@@ -31,6 +35,11 @@ const FALLBACK: AttendanceConfig = {
   handoffMessage: 'Entendi! Um atendente humano vai assumir em breve. Obrigada pela paciência! 🙏',
   outsideHoursMessage: 'Olá! Nosso atendimento automático está disponível das 8h às 22h. Deixe sua mensagem que retornamos em breve. 🙏',
   businessHours: { enabled: false, start: '08:00', end: '22:00', timezone: 'America/Sao_Paulo' },
+  idleHumanAlertEnabled: true,
+  idleHumanAlertMinutes: 5,
+  idleHumanNotifyCustomer: true,
+  idleHumanCustomerMessage:
+    'Desculpe a demora! Já chamei um atendente humano para te ajudar. Em instantes alguém assume por aqui. 🙏',
 };
 
 const AttendanceSettingsView: React.FC = () => {
@@ -144,6 +153,53 @@ const AttendanceSettingsView: React.FC = () => {
             className="bs-input min-h-[70px]"
             value={local.handoffMessage}
             onChange={(e) => setLocal({ ...local, handoffMessage: e.target.value })}
+          />
+        </div>
+      </div>
+
+      <div className="bs-section space-y-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="font-semibold text-bs-text">Alerta se cliente esperar demais</p>
+            <p className="text-xs text-bs-muted">
+              Se a última mensagem for do cliente e ninguém responder, marca a conversa como humano e avisa no Discord/WhatsApp de alerta.
+            </p>
+          </div>
+          <Toggle
+            on={local.idleHumanAlertEnabled !== false}
+            onChange={(v) => persist({ ...local, idleHumanAlertEnabled: v })}
+          />
+        </div>
+        <div>
+          <label className="text-xs text-bs-muted mb-1 block">Minutos sem resposta</label>
+          <input
+            type="number"
+            className="bs-input max-w-[140px]"
+            min={1}
+            max={60}
+            value={local.idleHumanAlertMinutes ?? 5}
+            onChange={(e) => setLocal({ ...local, idleHumanAlertMinutes: Number(e.target.value) || 5 })}
+            disabled={local.idleHumanAlertEnabled === false}
+          />
+        </div>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-sm font-medium text-bs-text">Avisar o cliente no WhatsApp</p>
+            <p className="text-xs text-bs-muted">Envia mensagem dizendo que um humano vai assumir.</p>
+          </div>
+          <Toggle
+            on={local.idleHumanNotifyCustomer !== false}
+            onChange={(v) => setLocal({ ...local, idleHumanNotifyCustomer: v })}
+            disabled={local.idleHumanAlertEnabled === false}
+          />
+        </div>
+        <div>
+          <label className="text-xs text-bs-muted mb-1 block">Mensagem ao cliente (espera longa)</label>
+          <textarea
+            className="bs-input min-h-[70px]"
+            value={local.idleHumanCustomerMessage || ''}
+            onChange={(e) => setLocal({ ...local, idleHumanCustomerMessage: e.target.value })}
+            disabled={local.idleHumanAlertEnabled === false || local.idleHumanNotifyCustomer === false}
           />
         </div>
       </div>

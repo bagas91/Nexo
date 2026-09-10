@@ -23,6 +23,14 @@ server/.wwebjs_cache/
 *.sqlite
 server/uploads/
 server/logs/
+server/data/
+server/media/
+server/inbox-media/
+server/inbox-avatars/
+
+# Exports / inventários locais (não versionar)
+inventario-*.csv
+*.csv
 
 # PM2 / runtime
 .pm2/

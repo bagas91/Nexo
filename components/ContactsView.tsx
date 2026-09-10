@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { usePlatformEntities } from '../hooks/usePlatformData';
 import type { MockContact } from '../services/mockStore';
+import { formatPhoneLabel, isWhatsAppLid } from '../utils/phoneDisplay';
 
 const ContactsView: React.FC = () => {
   const [filter, setFilter] = useState('');
   const { items: contacts, loading } = usePlatformEntities<MockContact>('contacts');
 
   const filtered = contacts.filter(
-    (c) => c.name.toLowerCase().includes(filter.toLowerCase()) || c.phone.includes(filter)
+    (c) => c.name.toLowerCase().includes(filter.toLowerCase())
+      || c.phone.includes(filter)
+      || formatPhoneLabel(c.phone).includes(filter)
   );
 
   if (loading) {
@@ -33,7 +36,9 @@ const ContactsView: React.FC = () => {
             {filtered.map((c) => (
               <tr key={c.id} className="bs-table-row">
                 <td className="font-medium text-bs-text">{c.name}</td>
-                <td className="font-mono text-xs text-bs-muted">{c.phone}</td>
+                <td className={`font-mono text-xs ${isWhatsAppLid(c.phone) ? 'text-amber-600 dark:text-amber-400' : 'text-bs-muted'}`}>
+                  {formatPhoneLabel(c.phone)}
+                </td>
                 <td>
                   <div className="flex flex-wrap gap-1">
                     {c.tags.map((t) => <span key={t} className="bs-badge-accent normal-case text-[9px]">{t}</span>)}

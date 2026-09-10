@@ -4,7 +4,8 @@
  * Env:
  *   GEMINI_API_KEY=
  *   OPENAI_API_KEY=
- *   AI_GEMINI_MODEL=gemini-2.0-flash
+ *   AI_GEMINI_MODEL=gemini-2.5-flash
+ *   AI_GEMINI_FALLBACK_MODELS=gemini-flash-latest,gemini-2.5-flash-lite
  *   AI_OPENAI_MODEL=gpt-4o-mini
  *   AI_DEFAULT_PROVIDER=gemini|openai
  */
@@ -19,10 +20,53 @@ import {
     renderPalavraDoDia
 } from './palavraDoDia.js';
 
-const GEMINI_MODEL = process.env.AI_GEMINI_MODEL || 'gemini-2.5-flash';
-const OPENAI_MODEL = process.env.AI_OPENAI_MODEL || 'gpt-4o-mini';
-const DEFAULT_PROVIDER = process.env.AI_DEFAULT_PROVIDER || 'gemini';
+const OPENAI_MODEL_DEFAULT = 'gpt-4o-mini';
 const CHAT_MAX_MESSAGES = 24;
+
+/** OpenAI / Gemini sem cota — evita insistir a cada clique. */
+let openaiQuotaBlockedUntil = 0;
+let geminiQuotaBlockedUntil = 0;
+
+function getOpenAiModel() {
+    return process.env.AI_OPENAI_MODEL || OPENAI_MODEL_DEFAULT;
+}
+
+function getGeminiModel() {
+    return process.env.AI_GEMINI_MODEL || 'gemini-2.5-flash';
+}
+
+function getGeminiFallbackModels() {
+    // Só modelos vivos — lite antigos e 2.0-flash quebram; cascata gasta a cota free (~20/min)
+    return String(
+        process.env.AI_GEMINI_FALLBACK_MODELS
+        || 'gemini-flash-latest',
+    )
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+}
+
+function geminiModelCandidates(preferred) {
+    const primary = String(preferred || getGeminiModel()).trim() || getGeminiModel();
+    const list = [primary, ...getGeminiFallbackModels()];
+    return [...new Set(list)];
+}
+
+export function isOpenAiQuotaBlocked() {
+    return Date.now() < openaiQuotaBlockedUntil;
+}
+
+export function markOpenAiQuotaBlocked(ms = 30 * 60 * 1000) {
+    openaiQuotaBlockedUntil = Date.now() + ms;
+}
+
+export function isGeminiQuotaBlocked() {
+    return Date.now() < geminiQuotaBlockedUntil;
+}
+
+export function markGeminiQuotaBlocked(ms = 65 * 1000) {
+    geminiQuotaBlockedUntil = Date.now() + ms;
+}
 
 const { productName, storeName, storeUrl } = BRANDING;
 
@@ -132,8 +176,10 @@ export function getAvailableProviders() {
     if (process.env.OPENAI_API_KEY) {
         providers.push('openai');
     }
-    const defaultProvider = providers.includes(DEFAULT_PROVIDER)
-        ? DEFAULT_PROVIDER
+    // Lê em runtime (dotenv no server.js roda depois dos imports ESM)
+    const preferred = process.env.AI_DEFAULT_PROVIDER || 'openai';
+    const defaultProvider = providers.includes(preferred)
+        ? preferred
         : (providers[0] || null);
     return { providers, defaultProvider };
 }
@@ -150,35 +196,165 @@ function resolveProvider(requested) {
     return provider;
 }
 
-async function callGemini(system, user, history = null, gen = {}) {
+async function callGeminiOnce(system, user, history = null, gen = {}) {
     const key = process.env.GEMINI_API_KEY;
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(key)}`;
+    const model = String(gen.model || getGeminiModel()).trim() || getGeminiModel();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
     const contents = history?.length
         ? history
         : [{ role: 'user', parts: [{ text: user }] }];
-    const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            systemInstruction: { parts: [{ text: system }] },
-            contents,
-            generationConfig: {
-                temperature: gen.temperature ?? 0.75,
-                maxOutputTokens: gen.maxOutputTokens ?? 2048,
-            },
-        })
-    });
+
+    const generationConfig = {
+        temperature: gen.temperature ?? 0.75,
+        maxOutputTokens: gen.maxOutputTokens ?? 2048,
+    };
+    if (gen.responseMimeType) {
+        generationConfig.responseMimeType = gen.responseMimeType;
+    }
+    // thinkingBudget: 0 desliga raciocínio interno (2.5 flash). Omitir deixa thinking ligado e estoura MAX_TOKENS cedo.
+    if (gen.thinkingBudget != null) {
+        generationConfig.thinkingConfig = { thinkingBudget: Math.max(0, Number(gen.thinkingBudget)) };
+    } else if (/gemini-2\.5|gemini-3/i.test(model)) {
+        generationConfig.thinkingConfig = { thinkingBudget: 0 };
+    }
+
+    const timeoutMs = Number(gen.timeoutMs) || Number(process.env.AI_HTTP_TIMEOUT_MS) || 25000;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    let res;
+    try {
+        res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                systemInstruction: { parts: [{ text: system }] },
+                contents,
+                generationConfig,
+            }),
+            signal: ac.signal,
+        });
+    } catch (err) {
+        if (err?.name === 'AbortError' || /aborted/i.test(String(err?.message || ''))) {
+            throw new Error(`Gemini(${model}): timeout após ${timeoutMs}ms`);
+        }
+        throw err;
+    } finally {
+        clearTimeout(timer);
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         const msg = data?.error?.message || res.statusText;
-        throw new Error(`Gemini: ${msg}`);
+        throw new Error(`Gemini(${model}): ${msg}`);
     }
-    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('')?.trim();
-    if (!text) throw new Error('Gemini retornou resposta vazia');
+    const candidate = data?.candidates?.[0];
+    const finishReason = candidate?.finishReason || '';
+    const parts = candidate?.content?.parts || [];
+    const text = parts
+        .filter((p) => p?.text && !p.thought)
+        .map((p) => p.text)
+        .join('')
+        .trim()
+        || parts.map((p) => p?.text || '').join('').trim();
+    if (!text) {
+        const block = data?.promptFeedback?.blockReason || finishReason || 'empty';
+        throw new Error(`Gemini(${model}) retornou resposta vazia (${block})`);
+    }
+    if (finishReason && finishReason !== 'STOP' && finishReason !== 'MAX_TOKENS') {
+        logger.warn('Gemini finishReason', { model, finishReason, preview: text.slice(0, 80) });
+    }
+    if (finishReason === 'MAX_TOKENS') {
+        logger.warn('Gemini truncou a resposta (MAX_TOKENS)', { model, preview: text.slice(0, 120) });
+        if (text.length < 180) {
+            throw new Error(`Gemini(${model}): resposta truncada (${text.length} chars)`);
+        }
+    }
     return text;
 }
 
+function isTransientGeminiError(err) {
+    const msg = String(err?.message || err || '');
+    return /no longer available|not found|404|high demand|503|UNAVAILABLE|timeout|429|RESOURCE_EXHAUSTED|rate.?limit/i.test(msg);
+}
+
+async function callGemini(system, user, history = null, gen = {}) {
+    if (isGeminiQuotaBlocked()) {
+        throw new Error('Gemini: cota free excedida (aguarde ~1 min). Limite típico: ~20 req/min.');
+    }
+    const models = geminiModelCandidates(gen.model);
+    let lastErr = null;
+    for (const model of models) {
+        try {
+            return await callGeminiOnce(system, user, history, { ...gen, model });
+        } catch (err) {
+            lastErr = err;
+            const msg = String(err?.message || err || '');
+            logger.warn('Gemini modelo falhou, tentando outro', model, msg.slice(0, 160));
+            // Cota é compartilhada — não queima os outros modelos
+            if (/quota|rate.?limit|429|RESOURCE_EXHAUSTED|free_tier/i.test(msg)) {
+                markGeminiQuotaBlocked();
+                throw err;
+            }
+            if (!isTransientGeminiError(err)) throw err;
+        }
+    }
+    throw lastErr || new Error('Gemini: todos os modelos falharam');
+}
+
+function getAgentGeminiModel() {
+    return process.env.AI_ATTENDANCE_GEMINI_MODEL
+        || process.env.AI_GEMINI_MODEL
+        || 'gemini-2.5-flash';
+}
+
+function resolveAgentProvider(requested) {
+    const { providers, defaultProvider } = getAvailableProviders();
+    const envPref = process.env.AI_ATTENDANCE_PROVIDER || defaultProvider;
+    let provider = requested && providers.includes(requested) ? requested : envPref;
+    if (!providers.includes(provider)) {
+        provider = defaultProvider;
+    }
+    if (provider === 'openai' && isOpenAiQuotaBlocked() && providers.includes('gemini')) {
+        logger.warn('IA atendimento: OpenAI sem cota — usando Gemini');
+        return 'gemini';
+    }
+    if (provider === 'gemini' && isGeminiQuotaBlocked() && providers.includes('openai') && !isOpenAiQuotaBlocked()) {
+        return 'openai';
+    }
+    return provider || defaultProvider;
+}
+
+function buildAgentAttempts(preferredProvider) {
+    const { providers } = getAvailableProviders();
+    const attempts = [];
+    const canOpenAi = providers.includes('openai');
+    const canGemini = providers.includes('gemini');
+    const openAiReady = canOpenAi && !isOpenAiQuotaBlocked();
+    const geminiReady = canGemini && !isGeminiQuotaBlocked();
+
+    if (preferredProvider === 'openai') {
+        if (openAiReady) attempts.push({ kind: 'openai' });
+        if (geminiReady) attempts.push({ kind: 'gemini' });
+    } else {
+        if (geminiReady) attempts.push({ kind: 'gemini' });
+        if (openAiReady) attempts.push({ kind: 'openai' });
+    }
+
+    if (!attempts.length) {
+        if (canGemini) attempts.push({ kind: 'gemini' });
+        else if (canOpenAi) attempts.push({ kind: 'openai' });
+    }
+    return attempts;
+}
+
+function isQuotaOrRateLimitError(err) {
+    const msg = String(err?.message || err || '');
+    return /quota|cota|cr[eé]dito|rate.?limit|429|RESOURCE_EXHAUSTED|exceeded your current quota|insufficient_quota|billing/i.test(msg);
+}
+
 async function callOpenAI(system, user, history = null, gen = {}) {
+    if (isOpenAiQuotaBlocked()) {
+        throw new Error('OpenAI: cota/crédito esgotado (bloqueio temporário). Use Gemini ou recarregue o billing.');
+    }
     const key = process.env.OPENAI_API_KEY;
     const messages = history?.length
         ? [{ role: 'system', content: system }, ...history]
@@ -186,22 +362,29 @@ async function callOpenAI(system, user, history = null, gen = {}) {
             { role: 'system', content: system },
             { role: 'user', content: user }
         ];
+    const body = {
+        model: getOpenAiModel(),
+        temperature: gen.temperature ?? 0.75,
+        max_tokens: gen.maxOutputTokens ?? 2048,
+        messages,
+    };
+    if (gen.responseMimeType === 'application/json') {
+        body.response_format = { type: 'json_object' };
+    }
     const res = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${key}`
         },
-        body: JSON.stringify({
-            model: OPENAI_MODEL,
-            temperature: gen.temperature ?? 0.75,
-            max_tokens: gen.maxOutputTokens ?? 2048,
-            messages
-        })
+        body: JSON.stringify(body)
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
         const msg = data?.error?.message || res.statusText;
+        if (/exceeded your current quota|billing|insufficient_quota/i.test(msg)) {
+            markOpenAiQuotaBlocked();
+        }
         throw new Error(`OpenAI: ${msg}`);
     }
     const text = data?.choices?.[0]?.message?.content?.trim();
@@ -229,7 +412,7 @@ export async function generateAiText({ action, provider: requestedProvider, brie
         brief.trim()
     );
 
-    logger.info(`IA: ${action} via ${provider} (${provider === 'gemini' ? GEMINI_MODEL : OPENAI_MODEL})`);
+    logger.info(`IA: ${action} via ${provider} (${provider === 'gemini' ? getGeminiModel() : getOpenAiModel()})`);
 
     const text = provider === 'openai'
         ? await callOpenAI(system, userPrompt)
@@ -374,7 +557,7 @@ REGRAS OBRIGATÓRIAS (WhatsApp — atendimento ${productName}):
  * Resposta de agente de atendimento com prompt customizado.
  */
 export async function generateAgentReply({ systemPrompt, messages, provider: requestedProvider, latestUserText }) {
-    const provider = resolveProvider(requestedProvider);
+    const provider = resolveAgentProvider(requestedProvider);
     const system = `${String(systemPrompt || '').trim()}\n\n${AGENT_WHATSAPP_RULES}`;
     let normalized = normalizeChatMessages(messages);
 
@@ -390,15 +573,74 @@ export async function generateAgentReply({ systemPrompt, messages, provider: req
         throw new Error('Mensagem do contato ausente.');
     }
 
-    logger.info(`IA agente atendimento: ${normalized.length} msgs via ${provider}`);
+    const gen = {
+        temperature: 0.45,
+        maxOutputTokens: Number(process.env.AI_ATTENDANCE_MAX_TOKENS) || 1024,
+        timeoutMs: 25000,
+        thinkingBudget: 0,
+        model: getAgentGeminiModel(),
+    };
+    const attempts = buildAgentAttempts(provider);
 
-    const gen = { temperature: 0.45, maxOutputTokens: 480 };
-
-    const text = provider === 'openai'
-        ? await callOpenAI(system, '', toOpenAiHistory(normalized), gen)
-        : await callGemini(system, '', toGeminiContents(normalized), gen);
-
-    return { text, provider };
+    let lastErr = null;
+    for (const attempt of attempts) {
+        try {
+            logger.info(`IA agente atendimento: ${normalized.length} msgs via ${attempt.kind}`);
+            const text = attempt.kind === 'openai'
+                ? await callOpenAI(system, '', toOpenAiHistory(normalized), gen)
+                : await callGemini(system, '', toGeminiContents(normalized), gen);
+            return { text, provider: attempt.kind };
+        } catch (err) {
+            lastErr = err;
+            if (isQuotaOrRateLimitError(err) && attempts.indexOf(attempt) < attempts.length - 1) {
+                logger.warn('IA: cota/rate-limit — tentando fallback', String(err?.message || err).slice(0, 160));
+                await new Promise((r) => setTimeout(r, 1500));
+                continue;
+            }
+            if (attempts.indexOf(attempt) < attempts.length - 1 && /503|overloaded|high demand|timeout|no longer available|MAX_TOKENS|vazia/i.test(String(err?.message || ''))) {
+                logger.warn('IA: falha temporária — tentando fallback', String(err?.message || err).slice(0, 120));
+                continue;
+            }
+            throw err;
+        }
+    }
+    throw lastErr || new Error('IA indisponível');
 }
 
-export default { getAvailableProviders, generateAiText, generatePalavraDoDia, generateChat, generateAgentReply };
+/**
+ * Geração com system prompt customizado (JSON / tarefas estruturadas).
+ */
+export async function generateWithSystem({
+    system,
+    user,
+    provider: requestedProvider,
+    temperature = 0.3,
+    maxOutputTokens = 1024,
+    responseMimeType,
+    thinkingBudget,
+} = {}) {
+    const provider = resolveProvider(requestedProvider);
+    const sys = String(system || '').trim();
+    const usr = String(user || '').trim();
+    if (!usr) throw new Error('Prompt do usuário ausente.');
+
+    const gen = { temperature, maxOutputTokens, responseMimeType, thinkingBudget };
+    const text = provider === 'openai'
+        ? await callOpenAI(sys, usr, null, gen)
+        : await callGemini(sys, usr, null, gen);
+
+    return { text, provider, action: 'system' };
+}
+
+export default {
+    getAvailableProviders,
+    generateAiText,
+    generatePalavraDoDia,
+    generateChat,
+    generateAgentReply,
+    generateWithSystem,
+    isOpenAiQuotaBlocked,
+    markOpenAiQuotaBlocked,
+    isGeminiQuotaBlocked,
+    markGeminiQuotaBlocked,
+};

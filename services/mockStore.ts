@@ -152,6 +152,12 @@ export interface MockContact {
   phone: string;
   tags: string[];
   lastSeen: number;
+  /** Notas da ficha do cliente (diferente da nota da conversa). */
+  notes?: string;
+  /** Origem digital: whatsapp | site | instagram | ads | other */
+  source?: string;
+  /** Cliente costuma pedir ajuda no WPP para comprar. */
+  needsHelp?: boolean;
 }
 
 export interface MockConversation {
@@ -164,13 +170,34 @@ export interface MockConversation {
   updatedAt: number;
 }
 
+/** Funil e-commerce + venda assistida no WhatsApp (sem presencial). */
+export type CrmDealStage =
+  | 'new'
+  | 'attending'
+  | 'link_sent'
+  | 'awaiting_payment'
+  | 'paid'
+  | 'lost'
+  /** Legado — mapeado na UI */
+  | 'lead'
+  | 'qualified'
+  | 'proposal'
+  | 'won';
+
 export interface CrmDeal {
   id: string;
   title: string;
   contactName: string;
-  stage: 'lead' | 'qualified' | 'proposal' | 'won' | 'lost';
+  phone?: string;
+  contactId?: string;
+  conversationId?: string;
+  stage: CrmDealStage;
   value: number;
+  /** whatsapp | site | instagram | ads | other */
+  source?: string;
+  notes?: string;
   updatedAt: number;
+  createdAt?: number;
 }
 
 export interface MockCampaign {
@@ -357,9 +384,36 @@ const SEED_CONVERSATIONS: MockConversation[] = [
 ];
 
 const SEED_DEALS: CrmDeal[] = [
-  { id: 'd1', title: 'Combo Florescer', contactName: 'Ana Compras', stage: 'proposal', value: 349, updatedAt: Date.now() - 3600000 },
-  { id: 'd2', title: 'Pedido oração', contactName: 'Maria Silva', stage: 'lead', value: 0, updatedAt: Date.now() - 7200000 },
-  { id: 'd3', title: 'Colar Mezuzah', contactName: 'Patricia L.', stage: 'won', value: 189, updatedAt: Date.now() - 86400000 * 2 },
+  {
+    id: 'd1',
+    title: 'Combo Florescer',
+    contactName: 'Ana Compras',
+    phone: '5511988882003',
+    stage: 'link_sent',
+    value: 349,
+    source: 'whatsapp',
+    updatedAt: Date.now() - 3600000,
+  },
+  {
+    id: 'd2',
+    title: 'Ajuda no checkout — Colar',
+    contactName: 'Maria Silva',
+    phone: '5562999991001',
+    stage: 'attending',
+    value: 0,
+    source: 'whatsapp',
+    updatedAt: Date.now() - 7200000,
+  },
+  {
+    id: 'd3',
+    title: 'Colar Mezuzah',
+    contactName: 'Patricia L.',
+    phone: '5562977773004',
+    stage: 'paid',
+    value: 189,
+    source: 'site',
+    updatedAt: Date.now() - 86400000 * 2,
+  },
 ];
 
 const SEED_CAMPAIGNS: MockCampaign[] = [
@@ -557,11 +611,11 @@ export const mockStore = {
       notifyNfe: true,
       notifyLowStock: false,
       statusMap: [
-        { blingStatus: 'Em aberto', message: 'Pedido {{numero}} recebido! Estamos preparando.', active: true },
-        { blingStatus: 'Atendido', message: 'Seu pedido {{numero}} foi separado e embalado.', active: true },
-        { blingStatus: 'Enviado', message: 'Pedido enviado! Rastreio: {{rastreio}}', active: true },
-        { blingStatus: 'Entregue', message: `Pedido entregue! Obrigada pela compra na ${BRANDING.storeName}.`, active: true },
-        { blingStatus: 'NF-e autorizada', message: 'Nota fiscal emitida para o pedido {{numero}}.', active: false },
+        { blingStatus: 'Em aberto', message: 'Olá {{nome}}! Pedido #{{numero}} recebido:\n{{produtos}}\nTotal: {{total}}. Estamos preparando.', active: true },
+        { blingStatus: 'Atendido', message: 'Olá {{nome}}! Seu pedido #{{numero}} ({{primeiro_produto}}) foi separado e embalado.', active: true },
+        { blingStatus: 'Enviado', message: 'Olá {{nome}}! Pedido #{{numero}} — {{produtos}} — enviado!\nRastreio: {{rastreio}}', active: true },
+        { blingStatus: 'Entregue', message: `Olá {{nome}}! Pedido #{{numero}} ({{primeiro_produto}}) entregue! Obrigada pela compra na ${BRANDING.storeName}.`, active: true },
+        { blingStatus: 'NF-e autorizada', message: 'Olá {{nome}}! NF-e emitida para o pedido #{{numero}} — {{produtos}}.', active: false },
       ],
     }),
   saveBling: (cfg: BlingConfig) => save('bling', cfg),

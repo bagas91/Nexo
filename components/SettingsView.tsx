@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { ConnectionStatus, User } from '../types';
 import WhatsAppConnection from './WhatsAppConnection';
 import UsersView from './UsersView';
@@ -7,9 +7,10 @@ import ProfileSettingsView from './ProfileSettingsView';
 import IntegrationsSettingsView from './IntegrationsSettingsView';
 import CsatSettingsView from './CsatSettingsView';
 import WidgetSettingsView from './WidgetSettingsView';
-import WooCommerceSettingsView from './WooCommerceSettingsView';
 import BlingSettingsView from './BlingSettingsView';
+import WooCommerceSettingsView from './WooCommerceSettingsView';
 import AttendanceSettingsView from './AttendanceSettingsView';
+import { SETTINGS_TAB_TO_MODULE, userHasModule } from '../config/modules';
 
 export type SettingsTab =
   | 'connections'
@@ -17,8 +18,8 @@ export type SettingsTab =
   | 'api'
   | 'profile'
   | 'integrations'
-  | 'woocommerce'
   | 'bling'
+  | 'woocommerce'
   | 'csat'
   | 'widget'
   | 'atendimento';
@@ -43,11 +44,17 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'atendimento', label: 'Atendimento IA' },
   { id: 'integrations', label: 'Integrações' },
   { id: 'users', label: 'Usuários' },
-  { id: 'csat', label: 'Pesquisa CSAT' },
   { id: 'api', label: 'API' },
-  { id: 'widget', label: 'Widget site' },
   { id: 'profile', label: 'Perfil' },
 ];
+
+function canTab(user: User, tab: SettingsTab) {
+  if (user.role === 'superadmin') return true;
+  if (tab === 'bling' || tab === 'woocommerce') return false;
+  const mod = SETTINGS_TAB_TO_MODULE[tab];
+  if (mod === null || mod === undefined) return false;
+  return userHasModule(user, mod);
+}
 
 const SettingsView: React.FC<SettingsViewProps> = ({
   tab,
@@ -63,8 +70,22 @@ const SettingsView: React.FC<SettingsViewProps> = ({
   onSync,
   syncing,
 }) => {
-  const currentLabel = TABS.find((t) => t.id === tab)?.label
-    || (tab === 'woocommerce' ? 'WooCommerce' : tab === 'bling' ? 'Bling ERP' : 'Configurações');
+  const visibleTabs = useMemo(() => TABS.filter((t) => canTab(user, t.id)), [user]);
+  const detailLabel = tab === 'bling' ? 'Bling ERP' : tab === 'woocommerce' ? 'WooCommerce' : null;
+  const currentLabel = visibleTabs.find((t) => t.id === tab)?.label
+    || detailLabel
+    || 'Configurações';
+  const selectValue = (tab === 'bling' || tab === 'woocommerce') ? 'integrations' : tab;
+
+  if (!canTab(user, (tab === 'bling' || tab === 'woocommerce') ? 'integrations' : tab)
+    && tab !== 'bling'
+    && tab !== 'woocommerce') {
+    return (
+      <div className="bs-card p-6 text-sm text-bs-muted">
+        Sem permissão para esta configuração.
+      </div>
+    );
+  }
 
   return (
     <div className="animate-fadeIn max-w-5xl">
@@ -73,20 +94,20 @@ const SettingsView: React.FC<SettingsViewProps> = ({
         <label className="text-xs text-bs-muted mt-3 mb-1 block">Seção</label>
         <select
           className="bs-input text-sm"
-          value={tab === 'woocommerce' || tab === 'bling' ? 'integrations' : tab}
+          value={selectValue}
           onChange={(e) => onTabChange(e.target.value as SettingsTab)}
         >
-          {TABS.map((t) => (
+          {visibleTabs.map((t) => (
             <option key={t.id} value={t.id}>{t.label}</option>
           ))}
         </select>
-        {(tab === 'woocommerce' || tab === 'bling') && (
+        {detailLabel && (
           <p className="text-xs text-bs-muted mt-2">Agora: <span className="text-bs-text font-medium">{currentLabel}</span></p>
         )}
       </div>
 
       <div className="min-w-0">
-        {tab === 'connections' && (
+        {tab === 'connections' && canTab(user, 'connections') && (
           <WhatsAppConnection
             status={status}
             qrCode={qrCode}
@@ -100,13 +121,19 @@ const SettingsView: React.FC<SettingsViewProps> = ({
             embedded
           />
         )}
-        {tab === 'integrations' && <IntegrationsSettingsView onTabChange={onTabChange} />}
+        {tab === 'integrations' && canTab(user, 'integrations') && (
+          <IntegrationsSettingsView onTabChange={onTabChange} />
+        )}
         {tab === 'atendimento' && <AttendanceSettingsView />}
-        {tab === 'woocommerce' && <WooCommerceSettingsView onBack={() => onTabChange('integrations')} />}
-        {tab === 'bling' && <BlingSettingsView onBack={() => onTabChange('integrations')} />}
-        {tab === 'users' && <UsersView embedded />}
+        {tab === 'bling' && user.role === 'superadmin' && (
+          <BlingSettingsView onBack={() => onTabChange('integrations')} />
+        )}
+        {tab === 'woocommerce' && user.role === 'superadmin' && (
+          <WooCommerceSettingsView onBack={() => onTabChange('integrations')} />
+        )}
+        {tab === 'users' && canTab(user, 'users') && <UsersView embedded />}
         {tab === 'csat' && <CsatSettingsView />}
-        {tab === 'api' && <ApiSettingsView />}
+        {tab === 'api' && canTab(user, 'api') && <ApiSettingsView />}
         {tab === 'widget' && <WidgetSettingsView />}
         {tab === 'profile' && <ProfileSettingsView user={user} />}
       </div>

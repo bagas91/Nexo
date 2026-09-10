@@ -30,6 +30,8 @@ export function signToken(user) {
         email: user.email,
         name: user.name,
         role: user.role,
+        modules: user.role === 'superadmin' ? ['*'] : (Array.isArray(user.modules) ? user.modules : []),
+        tv: Number(user.tokenVersion) || 0,
         exp: Date.now() + TOKEN_TTL_MS
     };
     const data = Buffer.from(JSON.stringify(payload)).toString('base64url');

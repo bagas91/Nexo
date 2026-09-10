@@ -9,6 +9,8 @@ export const BRANDING = {
   storeName: 'Nexo Loja',
   storeUrl: 'https://exemplo.com',
   vpsUrl: 'https://cristian.vps-kinghost.net',
+  /** Marca comercial dos produtos no Bling/ML (não confundir com nome do app). */
+  catalogBrand: 'Virginia Arruda',
   studioName: 'BagStudio',
   studioAuthor: 'Cristian Santos',
   version: '1.0.0-dev',

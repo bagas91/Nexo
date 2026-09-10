@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChatEntity, FileAttachment, MediaLayout } from '../types';
 import { BackendService } from '../services/backendService';
 import { useToast } from '../contexts/ToastContext';
-import { getAttachmentMaxBytes, getAttachmentLimitLabel } from '../utils/attachmentLimits';
+import { getAttachmentMaxBytes, getAttachmentLimitLabel, hasVideoAttachment, isVideoAttachment, VIDEO_DISPATCH_WARNING } from '../utils/attachmentLimits';
 
 interface GroupDispatchViewProps {
   chats: ChatEntity[];
@@ -68,6 +68,9 @@ const GroupDispatchView: React.FC<GroupDispatchViewProps> = ({ chats }) => {
         reader.readAsDataURL(file);
       });
       newAttachments.push(await filePromise);
+    }
+    if (newAttachments.some(isVideoAttachment)) {
+      showToast(VIDEO_DISPATCH_WARNING, 'info');
     }
     setAttachments((prev) => [...prev, ...newAttachments]);
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -192,7 +195,7 @@ const GroupDispatchView: React.FC<GroupDispatchViewProps> = ({ chats }) => {
 
               <div className="mb-4">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-bs-muted">Anexos ({attachments.length}) · Vídeo até 32 MB</span>
+                  <span className="text-xs text-bs-muted">Anexos ({attachments.length}) · Preferir imagem+áudio</span>
                   <button
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
@@ -209,6 +212,11 @@ const GroupDispatchView: React.FC<GroupDispatchViewProps> = ({ chats }) => {
                     accept="image/*,video/*,audio/*,application/pdf"
                   />
                 </div>
+                {hasVideoAttachment(attachments) && (
+                  <div className="mb-2 rounded-lg border border-amber-400/50 bg-amber-500/10 px-2.5 py-2 text-[11px] text-amber-900 dark:text-amber-200">
+                    <strong>Vídeo anexado:</strong> pode travar a sessão. Preferir imagem + áudio + texto.
+                  </div>
+                )}
                 {attachments.length > 0 && (
                   <div className="flex flex-wrap gap-2">
                     {attachments.map((file, idx) => (

@@ -16,9 +16,12 @@ import userService from './utils/userService.js';
 import imageService from './utils/imageService.js';
 import crypto from 'crypto';
 import platformRoutes, { webhookRouter } from './routes/platformRoutes.js';
+import catalogRoutes from './routes/catalogRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
 import { handleBlingOAuthCallback } from './routes/blingOAuth.js';
 import { ensurePlatformDefaults } from './utils/platformDefaults.js';
 import { ensurePlatformSeeds } from './utils/platformSeeds.js';
+import { clientIp } from './utils/auditService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -269,6 +272,8 @@ if (fs.existsSync(distPath)) {
 app.use(authenticate);
 
 app.use('/api/platform', platformRoutes);
+app.use('/api/catalog', catalogRoutes);
+app.use('/api/admin', adminRoutes);
 
 app.get('/api/inbox/conversations', (req, res) => {
     res.json(chatDB.listInboxConversations(200));
@@ -276,7 +281,14 @@ app.get('/api/inbox/conversations', (req, res) => {
 
 app.get('/api/inbox/conversations/:chatId/messages', (req, res) => {
     const chatId = decodeURIComponent(req.params.chatId);
-    res.json(chatDB.listInboxMessages(chatId, 200));
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 500);
+    const beforeTs = req.query.before ? Number(req.query.before) : null;
+    const result = chatDB.listInboxMessages(chatId, limit, { beforeTs });
+    // Compat: se o cliente antigo espera array, ainda funciona com .messages
+    if (req.query.meta === '0') {
+        return res.json(result.messages || result);
+    }
+    res.json(result);
 });
 
 app.post('/api/inbox/conversations/:chatId/read', (req, res) => {
@@ -289,6 +301,30 @@ app.post('/api/inbox/conversations/:chatId/mode', (req, res) => {
         const chatId = decodeURIComponent(req.params.chatId);
         const { mode } = req.body || {};
         const conv = chatDB.setInboxConversationMode(chatId, mode);
+        if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' });
+        res.json(conv);
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+app.post('/api/inbox/conversations/:chatId/status', (req, res) => {
+    try {
+        const chatId = decodeURIComponent(req.params.chatId);
+        const { status } = req.body || {};
+        const conv = chatDB.setInboxConversationStatus(chatId, status);
+        if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' });
+        res.json(conv);
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+app.post('/api/inbox/conversations/:chatId/notes', (req, res) => {
+    try {
+        const chatId = decodeURIComponent(req.params.chatId);
+        const notes = req.body?.notes ?? '';
+        const conv = chatDB.setInboxConversationNotes(chatId, notes);
         if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' });
         res.json(conv);
     } catch (err) {
@@ -316,6 +352,32 @@ app.post('/api/inbox/conversations/:chatId/test-agent', async (req, res) => {
         res.json({ success: true, message: 'Agente acionado — resposta em ~2s' });
     } catch (err) {
         res.status(500).json({ error: err?.message || String(err) });
+    }
+});
+
+app.get('/api/inbox/media/:filename', async (req, res) => {
+    try {
+        const { getInboxMediaFilePath } = await import('./services/inboxMediaService.js');
+        const filePath = getInboxMediaFilePath(req.params.filename);
+        if (!filePath || !fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'Arquivo não encontrado' });
+        }
+        res.sendFile(filePath);
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+app.get('/api/inbox/avatars/:filename', async (req, res) => {
+    try {
+        const { getInboxAvatarFilePath } = await import('./services/inboxMediaService.js');
+        const filePath = getInboxAvatarFilePath(req.params.filename);
+        if (!filePath || !fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'Arquivo não encontrado' });
+        }
+        res.sendFile(filePath);
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
     }
 });
 
@@ -574,10 +636,20 @@ app.post('/api/dispatch/stop-all', (req, res) => {
 });
 
 app.post('/api/dispatch/resume', (req, res) => {
-    dispatchPaused = false;
-    sendCancelRequested = false;
-    logger.info('API: Disparos reativados pelo usuário');
-    res.json({ success: true, dispatchPaused: false });
+    try {
+        dispatchPaused = false;
+        sendCancelRequested = false;
+        let unpaused = 0;
+        const wantUnpause = !!(req.body?.unpauseSchedules ?? req.query?.unpauseSchedules);
+        if (wantUnpause && typeof chatDB.unpauseAllSchedules === 'function') {
+            unpaused = chatDB.unpauseAllSchedules();
+        }
+        logger.info('API: Disparos reativados pelo usuário', { unpaused });
+        res.json({ success: true, dispatchPaused: false, unpaused });
+    } catch (err) {
+        logger.error('API: Erro ao reativar disparos', err.message);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 app.get('/api/health', (req, res) => {
@@ -886,19 +958,64 @@ async function maybeRunControlledRestart(reason) {
 async function executeBulkSend(chatIds, content, attachments, meta = {}) {
     const hasAttachments = attachments && attachments.length > 0;
     const delayMs = hasAttachments ? DELAY_BETWEEN_SENDS_WITH_ATTACHMENTS_MS : DELAY_BETWEEN_SENDS_MS;
-    const results = { sent: 0, failed: 0, errors: [] };
+    const results = { sent: 0, failed: 0, errors: [], skipped: 0 };
     const failedForRetry = [];
+    const totalFull = Array.isArray(meta.allTargets) ? meta.allTargets.length : chatIds.length;
     const total = chatIds.length;
     let detachedDetected = false;
     const {
-        source = 'immediate',
+        source = 'bulk',
         sourceLabel = 'Envio em massa',
         scheduleId = null,
         mediaLayout = 'caption_on_image',
+        alreadySentIds = [],
     } = meta;
     const sendOptions = { mediaLayout };
+    const sentIds = [...(Array.isArray(alreadySentIds) ? alreadySentIds : [])];
 
-    startSendProgress({ total, source, sourceLabel, scheduleId });
+    const persistCheckpoint = () => {
+        if (!scheduleId || typeof chatDB.updateScheduleProgress !== 'function') return;
+        try {
+            chatDB.updateScheduleProgress(scheduleId, {
+                sentIds,
+                nextIndex: sentIds.length,
+                updatedAt: Date.now(),
+            });
+        } catch (err) {
+            logger.warn('Bulk: falha ao gravar checkpoint', err?.message || err);
+        }
+    };
+
+    let preparedAttachments = attachments;
+    if (hasAttachments) {
+        try {
+            const { prepareAttachmentsForWhatsApp } = await import('./utils/mediaPrepare.js');
+            preparedAttachments = await prepareAttachmentsForWhatsApp(attachments);
+            sendOptions.attachmentsPrepared = true;
+            logger.info(`Bulk: mídia preparada 1× para ${preparedAttachments.length} anexo(s)`);
+        } catch (err) {
+            logger.warn('Bulk: preparo antecipado de mídia falhou — fallback por destino', err?.message || err);
+            preparedAttachments = attachments;
+            sendOptions.attachmentsPrepared = false;
+        }
+    }
+
+    startSendProgress({
+        total: totalFull || total,
+        source,
+        sourceLabel,
+        scheduleId,
+    });
+    if (sentIds.length > 0) {
+        results.skipped = sentIds.length;
+        sendProgress.sent = sentIds.length;
+        pushSendProgressLog({
+            type: 'info',
+            message: `Retomando: ${sentIds.length} destino(s) já enviados — restam ${total}`,
+            total: totalFull || total,
+        });
+        logger.info(`Bulk: checkpoint — pulando ${sentIds.length} já enviados, ${total} restantes`);
+    }
 
     for (let i = 0; i < chatIds.length; i++) {
         if (sendCancelRequested) {
@@ -913,41 +1030,46 @@ async function executeBulkSend(chatIds, content, attachments, meta = {}) {
                     message: `Cancelado: "${cname}"`,
                     chatName: cname,
                     chatId: cid,
-                    index: i + 1,
-                    total
+                    index: sentIds.length + i + 1,
+                    total: totalFull || total
                 });
             }
-            pushSendProgressLog({ type: 'error', message: 'Envio interrompido — cancelado pelo usuário', total });
+            persistCheckpoint();
+            pushSendProgressLog({ type: 'error', message: 'Envio interrompido — cancelado pelo usuário', total: totalFull || total });
             finishSendProgress('failed');
             sendCancelRequested = false;
             results.cancelled = true;
+            results.sentIds = sentIds;
             emitBulkSendReport(results, { source, sourceLabel, scheduleId }, attachments);
             return results;
         }
         const chatId = chatIds[i];
         const chatName = whatsappClient.getChatName(chatId) || chatId;
-        setSendProgressCurrent(i + 1, chatId, chatName);
+        const displayIndex = sentIds.length + i + 1;
+        setSendProgressCurrent(displayIndex, chatId, chatName);
         pushSendProgressLog({
             type: 'info',
             message: `Enviando para "${chatName}"…`,
             chatName,
             chatId,
-            index: i + 1,
-            total
+            index: displayIndex,
+            total: totalFull || total
         });
         try {
-            await whatsappClient.sendMessage(chatId, content, attachments, sendOptions);
+            await whatsappClient.sendMessage(chatId, content, preparedAttachments, sendOptions);
             results.sent++;
-            sendProgress.sent = results.sent;
+            sentIds.push(chatId);
+            sendProgress.sent = sentIds.length;
+            persistCheckpoint();
             pushSendProgressLog({
                 type: 'success',
                 message: `Entregue: "${chatName}"`,
                 chatName,
                 chatId,
-                index: i + 1,
-                total
+                index: displayIndex,
+                total: totalFull || total
             });
-            logger.info(`✔ [${i + 1}/${total}] Entregue: "${chatName}"`);
+            logger.info(`✔ [${displayIndex}/${totalFull || total}] Entregue: "${chatName}"`);
         } catch (err) {
             results.failed++;
             sendProgress.failed = results.failed;
@@ -958,11 +1080,11 @@ async function executeBulkSend(chatIds, content, attachments, meta = {}) {
                 message: `Falha em "${chatName}": ${errMsg.length > 120 ? errMsg.slice(0, 120) + '…' : errMsg}`,
                 chatName,
                 chatId,
-                index: i + 1,
-                total
+                index: displayIndex,
+                total: totalFull || total
             });
             const errPreview = errMsg.length > 400 ? errMsg.slice(0, 400) + '...' : errMsg;
-            logger.error(`❌ [${i + 1}/${total}] Falha no grupo "${chatName}" (id: ${chatId}): ${errPreview}`);
+            logger.error(`❌ [${displayIndex}/${totalFull || total}] Falha no grupo "${chatName}" (id: ${chatId}): ${errPreview}`);
             if (errMsg.length > 400) logger.error('Erro completo:', errMsg);
 
             if (isDetachedLikeError(err.message)) {
@@ -971,36 +1093,28 @@ async function executeBulkSend(chatIds, content, attachments, meta = {}) {
                     detachedDetected = true;
                     const remaining = total - (i + 1);
                     if (remaining > 0) {
-                        logger.warn(`Sessão WhatsApp Web inválida (detached Frame). Interrompendo envio; ${remaining} grupo(s) restantes marcados como falha. Reconectando...`);
+                        logger.warn(`Sessão WhatsApp Web inválida (detached Frame). Interrompendo; ${remaining} grupo(s) ficam no checkpoint para retomar.`);
                         pushSendProgressLog({
                             type: 'error',
-                            message: `Sessão instável — interrompendo envio (${remaining} destino(s) restantes)`,
-                            index: i + 1,
-                            total
+                            message: `Sessão instável — checkpoint salvo (${sentIds.length} ok, ${remaining} pendentes)`,
+                            index: displayIndex,
+                            total: totalFull || total
                         });
                         notifier.notifyOnce(
                             'whatsapp-session-detached',
-                            `Sessão WhatsApp Web inválida (detached Frame). Envio interrompido; ${remaining + 1} grupo(s) não enviados. Reconexão automática em andamento.`,
+                            `Sessão WhatsApp instável. Checkpoint: ${sentIds.length} enviado(s), ${remaining + 1} restante(s) serão retomados automaticamente.`,
                             'warn',
                             2 * 60 * 1000
                         );
+                        // Não marca restantes como failed — ficam no checkpoint / retry
                         for (let j = i + 1; j < chatIds.length; j++) {
-                            const cid = chatIds[j];
-                            const cname = whatsappClient.getChatName(cid) || cid;
-                            results.failed++;
-                            sendProgress.failed = results.failed;
-                            results.errors.push({ chatId: cid, chatName: cname, error: err.message });
-                            failedForRetry.push({ chatId: cid, chatName: cname });
-                            pushSendProgressLog({
-                                type: 'error',
-                                message: `Não enviado (sessão): "${cname}"`,
-                                chatName: cname,
-                                chatId: cid,
-                                index: j + 1,
-                                total
+                            failedForRetry.push({
+                                chatId: chatIds[j],
+                                chatName: whatsappClient.getChatName(chatIds[j]) || chatIds[j],
                             });
                         }
                     }
+                    persistCheckpoint();
                     whatsappClient.requestReconnect();
                     break;
                 }
@@ -1013,70 +1127,98 @@ async function executeBulkSend(chatIds, content, attachments, meta = {}) {
 
     if (failedForRetry.length > 0) {
         const waitMs = detachedDetected ? Math.max(RETRY_AFTER_DETACHED_MS, 25000) : RETRY_AFTER_DETACHED_MS;
-        logger.info(`Envio em massa: ${failedForRetry.length} falha(s) por Frame detach; aguardando ${waitMs / 1000}s para retry`);
+        logger.info(`Envio em massa: ${failedForRetry.length} destino(s) para retry; aguardando ${waitMs / 1000}s`);
         pushSendProgressLog({
             type: 'info',
             message: `Aguardando reconexão para retentar ${failedForRetry.length} destino(s)…`,
-            total
+            total: totalFull || total
         });
         await new Promise(r => setTimeout(r, waitMs));
 
         if (detachedDetected) {
             const ready = await waitForClientReady(WAIT_FOR_READY_AFTER_RECONNECT_MS);
             if (!ready) {
-                logger.warn('Cliente WhatsApp ainda não está pronto após reconexão; retry de envio em massa cancelado. Tente novamente quando estiver conectado.');
-                notifier.notify('Reconexão automática feita, mas o WhatsApp ainda não está pronto. Envio em massa não reenviado; tente de novo quando estiver conectado.', 'warn');
+                logger.warn('Cliente WhatsApp ainda não está pronto após reconexão; mantendo checkpoint para o próximo ciclo.');
+                notifier.notify('Reconexão feita, mas WhatsApp ainda não pronto. Checkpoint preservado — o worker retoma os restantes.', 'warn');
                 results.sessionUnhealthy = true;
             } else {
                 logger.info('Cliente WhatsApp pronto; executando retry dos envios que falharam.');
-                pushSendProgressLog({ type: 'info', message: 'WhatsApp reconectado — retentando envios…', total });
+                pushSendProgressLog({ type: 'info', message: 'WhatsApp reconectado — retentando envios…', total: totalFull || total });
             }
         }
 
         if (!detachedDetected || whatsappClient.getStatus().ready) {
             for (let i = 0; i < failedForRetry.length; i++) {
+                if (sendCancelRequested) {
+                    results.cancelled = true;
+                    results.sessionUnhealthy = true;
+                    break;
+                }
                 const { chatId, chatName } = failedForRetry[i];
+                if (sentIds.includes(chatId)) continue;
                 pushSendProgressLog({
                     type: 'info',
                     message: `Retentando "${chatName}"…`,
                     chatName,
                     chatId,
-                    total
+                    total: totalFull || total
                 });
                 try {
-                    await whatsappClient.sendMessage(chatId, content, attachments, sendOptions);
+                    await whatsappClient.sendMessage(chatId, content, preparedAttachments, sendOptions);
                     results.sent++;
-                    results.failed--;
-                    sendProgress.sent = results.sent;
-                    sendProgress.failed = results.failed;
+                    if (results.failed > 0) results.failed--;
+                    sentIds.push(chatId);
+                    sendProgress.sent = sentIds.length;
+                    sendProgress.failed = Math.max(0, results.failed);
                     results.errors = results.errors.filter(e => e.chatId !== chatId);
+                    persistCheckpoint();
                     pushSendProgressLog({
                         type: 'success',
                         message: `Entregue (retry): "${chatName}"`,
                         chatName,
                         chatId,
-                        total
+                        total: totalFull || total
                     });
                     logger.info(`✔ [retry] Entregue: "${chatName}"`);
-            } catch (err) {
-                const errMsg = (err && err.message) ? String(err.message) : String(err);
-                pushSendProgressLog({
-                    type: 'error',
-                    message: `Falha no retry "${chatName}": ${errMsg.length > 100 ? errMsg.slice(0, 100) + '…' : errMsg}`,
-                    chatName,
-                    chatId,
-                    total
-                });
-                const errPreview = errMsg.length > 400 ? errMsg.slice(0, 400) + '...' : errMsg;
-                logger.error(`❌ [retry] Falha no grupo "${chatName}" (id: ${chatId}): ${errPreview}`);
-                if (errMsg.length > 400) logger.error('Erro completo (retry):', errMsg);
-            }
+                } catch (err) {
+                    const errMsg = (err && err.message) ? String(err.message) : String(err);
+                    if (!results.errors.some((e) => e.chatId === chatId)) {
+                        results.failed++;
+                        results.errors.push({ chatId, chatName, error: errMsg });
+                    }
+                    sendProgress.failed = results.failed;
+                    pushSendProgressLog({
+                        type: 'error',
+                        message: `Falha no retry "${chatName}": ${errMsg.length > 100 ? errMsg.slice(0, 100) + '…' : errMsg}`,
+                        chatName,
+                        chatId,
+                        total: totalFull || total
+                    });
+                    const errPreview = errMsg.length > 400 ? errMsg.slice(0, 400) + '...' : errMsg;
+                    logger.error(`❌ [retry] Falha no grupo "${chatName}" (id: ${chatId}): ${errPreview}`);
+                    if (isDetachedLikeError(errMsg)) {
+                        results.sessionUnhealthy = true;
+                        persistCheckpoint();
+                        break;
+                    }
+                }
                 if (i < failedForRetry.length - 1) await new Promise(r => setTimeout(r, delayMs));
             }
         }
     }
 
-    finishSendProgress(results.failed > 0 ? 'failed' : 'completed');
+    results.sentIds = sentIds;
+    const allDone = !results.sessionUnhealthy && !results.cancelled
+        && (meta.allTargets
+            ? sentIds.length >= meta.allTargets.length && results.errors.length === 0
+            : results.failed === 0);
+    if (scheduleId && allDone && typeof chatDB.clearScheduleProgress === 'function') {
+        chatDB.clearScheduleProgress(scheduleId);
+    } else {
+        persistCheckpoint();
+    }
+
+    finishSendProgress(results.sessionUnhealthy || results.failed > 0 || results.cancelled ? 'failed' : 'completed');
     emitBulkSendReport(results, { source, sourceLabel, scheduleId }, attachments);
     return results;
 }
@@ -1356,23 +1498,34 @@ app.post('/api/schedules/:id/send-now', async (req, res) => {
         const attachments = loadScheduleAttachments(schedule.id, schedule.attachmentsMeta);
         chatDB.updateScheduleStatus(schedule.id, 'sending', null);
         sendInProgressCount += 1;
+        const allTargets = Array.isArray(schedule.targets) ? schedule.targets : [];
+        const sentIds = Array.isArray(schedule.progress?.sentIds) ? schedule.progress.sentIds : [];
+        const remaining = allTargets.filter((tid) => !sentIds.includes(tid));
         let results;
         try {
-            results = await executeBulkSend(schedule.targets, schedule.content, attachments, {
+            results = await executeBulkSend(remaining.length ? remaining : allTargets, schedule.content, attachments, {
                 source: 'schedule',
-                sourceLabel: 'Reenvio de agendamento',
+                sourceLabel: sentIds.length ? 'Reenvio (retomada)' : 'Reenvio de agendamento',
                 scheduleId: schedule.id,
                 mediaLayout: schedule.mediaLayout,
+                alreadySentIds: sentIds,
+                allTargets,
             });
         } finally {
             sendInProgressCount = Math.max(0, sendInProgressCount - 1);
         }
-        const failed = results.failed > 0;
-        chatDB.updateScheduleStatus(schedule.id, failed ? 'failed' : 'sent', failed ? `${results.failed} falha(s)` : null);
-        if (!failed) {
+        if (results.sessionUnhealthy) {
+            chatDB.incrementScheduleRetryCount?.(schedule.id);
+            return res.json({ success: false, resumed: true, ...results });
+        }
+        const finalSent = Array.isArray(results.sentIds) ? results.sentIds.length : (sentIds.length + results.sent);
+        const fullyDone = !results.cancelled && finalSent >= allTargets.length && results.failed === 0;
+        chatDB.updateScheduleStatus(schedule.id, fullyDone ? 'sent' : 'failed', fullyDone ? null : `${results.failed} falha(s)`);
+        if (fullyDone) {
+            chatDB.clearScheduleProgress?.(schedule.id);
             removeScheduleAttachments(schedule.id);
         }
-        res.json({ success: !failed, ...results });
+        res.json({ success: fullyDone, ...results });
     } catch (err) {
         logger.error('API: Erro ao enviar agendamento agora', err.message);
         res.status(500).json({ error: err.message });
@@ -1462,7 +1615,7 @@ app.get('/api/session/backups', async (req, res) => {
 app.post('/api/login', (req, res) => {
     try {
         const { email, password } = req.body || {};
-        const result = userService.login(email, password);
+        const result = userService.login(email, password, { ip: clientIp(req) });
         if (!result) {
             return res.status(401).json({ error: 'Usuário ou senha inválidos' });
         }
@@ -1473,7 +1626,13 @@ app.post('/api/login', (req, res) => {
 });
 
 app.get('/api/me', (req, res) => {
-    res.json({ user: req.user });
+    try {
+        const fresh = userService.getSafeUserById(req.user?.id);
+        if (fresh) return res.json({ user: fresh });
+        res.json({ user: req.user });
+    } catch (err) {
+        res.json({ user: req.user });
+    }
 });
 
 app.get('/api/users', requireSuperadmin, (req, res) => {
@@ -1482,9 +1641,29 @@ app.get('/api/users', requireSuperadmin, (req, res) => {
 
 app.post('/api/users', requireSuperadmin, (req, res) => {
     try {
-        const { email, password, name, role } = req.body || {};
-        const user = userService.createUser({ email, password, name, role: role || 'creator' });
+        const { email, password, name, role, modules, phone } = req.body || {};
+        const user = userService.createUser(
+            {
+                email,
+                password,
+                name,
+                role: role || 'operator',
+                modules: modules || [],
+                phone: phone || null,
+            },
+            req.user,
+            { ip: clientIp(req) },
+        );
         res.json({ success: true, user });
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+app.delete('/api/users/:id', requireSuperadmin, (req, res) => {
+    try {
+        userService.deleteUser(req.params.id, req.user, { ip: clientIp(req) });
+        res.json({ success: true });
     } catch (err) {
         res.status(400).json({ error: err?.message || String(err) });
     }
@@ -1492,7 +1671,7 @@ app.post('/api/users', requireSuperadmin, (req, res) => {
 
 app.patch('/api/users/:id', requireSuperadmin, (req, res) => {
     try {
-        const user = userService.updateUser(req.params.id, req.body || {});
+        const user = userService.updateUser(req.params.id, req.body || {}, req.user, { ip: clientIp(req) });
         res.json({ success: true, user });
     } catch (err) {
         res.status(400).json({ error: err?.message || String(err) });
@@ -1679,24 +1858,49 @@ async function runScheduleWorker() {
         for (const schedule of due) {
             chatDB.updateScheduleStatus(schedule.id, 'sending', null);
             const attachments = loadScheduleAttachments(schedule.id, schedule.attachmentsMeta);
+            const allTargets = Array.isArray(schedule.targets) ? schedule.targets : [];
+            const sentIds = Array.isArray(schedule.progress?.sentIds) ? schedule.progress.sentIds : [];
+            const remaining = allTargets.filter((id) => !sentIds.includes(id));
+            if (remaining.length === 0 && allTargets.length > 0) {
+                chatDB.clearScheduleProgress?.(schedule.id);
+                chatDB.updateScheduleStatus(schedule.id, 'sent', null);
+                removeScheduleAttachments(schedule.id);
+                logger.info(`Worker: Agendamento ${schedule.id} já completo via checkpoint — marcado sent`);
+                continue;
+            }
             try {
-                logger.info(`Worker: Executando agendamento ${schedule.id} (${schedule.targets.length} grupo(s))`);
-                const results = await executeBulkSend(schedule.targets, schedule.content, attachments, {
+                logger.info(
+                    `Worker: Executando agendamento ${schedule.id} `
+                    + `(${remaining.length}/${allTargets.length} restante(s)`
+                    + `${sentIds.length ? `, checkpoint ${sentIds.length}` : ''})`,
+                );
+                const results = await executeBulkSend(remaining, schedule.content, attachments, {
                     source: 'worker',
-                    sourceLabel: 'Agendamento automático',
+                    sourceLabel: sentIds.length ? 'Agendamento (retomada)' : 'Agendamento automático',
                     scheduleId: schedule.id,
                     mediaLayout: schedule.mediaLayout,
+                    alreadySentIds: sentIds,
+                    allTargets,
                 });
                 if (results.sessionUnhealthy && (schedule.retryCount ?? 0) < SCHEDULE_SESSION_RETRY_MAX) {
                     chatDB.incrementScheduleRetryCount(schedule.id);
-                    logger.info(`Worker: Agendamento ${schedule.id} mantido como pending (retry ${(schedule.retryCount ?? 0) + 1}/${SCHEDULE_SESSION_RETRY_MAX} por sessão indisponível)`);
+                    logger.info(`Worker: Agendamento ${schedule.id} mantido pending com checkpoint (retry ${(schedule.retryCount ?? 0) + 1}/${SCHEDULE_SESSION_RETRY_MAX})`);
                     continue;
                 }
-                chatDB.updateScheduleStatus(schedule.id, results.failed === 0 ? 'sent' : 'failed', results.failed > 0 ? `${results.failed} falha(s)` : null);
-                if (results.failed === 0) {
+                const finalSent = Array.isArray(results.sentIds) ? results.sentIds.length : (sentIds.length + results.sent);
+                const fullyDone = !results.cancelled && !results.sessionUnhealthy
+                    && finalSent >= allTargets.length
+                    && results.failed === 0;
+                chatDB.updateScheduleStatus(
+                    schedule.id,
+                    fullyDone ? 'sent' : 'failed',
+                    fullyDone ? null : `${results.failed || 0} falha(s); ${finalSent}/${allTargets.length} ok`,
+                );
+                if (fullyDone) {
+                    chatDB.clearScheduleProgress?.(schedule.id);
                     removeScheduleAttachments(schedule.id);
                 }
-                if (results.failed === 0 && schedule.repeatDaily) {
+                if (fullyDone && schedule.repeatDaily) {
                     const nextId = 'sch_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
                     const scheduledAtMs = typeof schedule.scheduledAt === 'number' ? schedule.scheduledAt : new Date(schedule.scheduledAt).getTime();
                     chatDB.saveSchedule({
@@ -1717,7 +1921,7 @@ async function runScheduleWorker() {
                 emitBulkSendReport(
                     {
                         sent: 0,
-                        failed: schedule.targets.length,
+                        failed: remaining.length || schedule.targets.length,
                         errors: [{ chatId: '-', chatName: 'erro interno', error: err.message }]
                     },
                     {
@@ -1920,6 +2124,15 @@ app.listen(PORT, () => {
         processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (inicial)', err?.message || err));
         setInterval(() => processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups', err?.message || err)), FOLLOWUP_WORKER_INTERVAL_MS);
     }).catch((err) => logger.error('FollowUp engine não carregou', err?.message || err));
+
+    const IDLE_HUMAN_INTERVAL_MS = 60 * 1000;
+    import('./services/attendanceIdleWatch.js').then(({ processIdleHumanAlerts }) => {
+        processIdleHumanAlerts().catch((err) => logger.error('Worker idle human (inicial)', err?.message || err));
+        setInterval(
+            () => processIdleHumanAlerts().catch((err) => logger.error('Worker idle human', err?.message || err)),
+            IDLE_HUMAN_INTERVAL_MS,
+        );
+    }).catch((err) => logger.error('Idle human watch não carregou', err?.message || err));
 
     startDailyRestartScheduler();
     startHealthcheckMonitor();

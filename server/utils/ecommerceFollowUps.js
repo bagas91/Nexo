@@ -1,5 +1,5 @@
 /**
- * Modelos prontos de Follow Up para e-commerce (WooCommerce / Bling).
+ * Modelos prontos de Follow Up para e-commerce (Bling).
  */
 
 import chatDB from '../db/database.js';
@@ -12,14 +12,14 @@ export const ECOMMERCE_FOLLOWUPS = [
         id: 'fu_ecom_confirm',
         name: 'E-commerce — Confirmação de pedido',
         active: false,
-        trigger: 'Confirmação Woo',
+        trigger: 'Pedido criado (Bling)',
         steps: [
             {
                 id: 's1',
                 type: 'message',
                 label: 'Confirmação imediata',
                 config: {
-                    text: `Olá {{name}}! 🛍️ Recebemos seu pedido na ${store}. Em breve você recebe a confirmação de pagamento por aqui.`,
+                    text: `Olá {{name}}! 🛍️ Recebemos seu pedido #{{numero}}:\n{{produtos}}\nTotal: {{total}}. Em breve você recebe a confirmação de pagamento por aqui.`,
                 },
             },
             { id: 's2', type: 'tag', label: 'Tag cliente', config: { tag: 'cliente-loja' } },
@@ -39,7 +39,7 @@ export const ECOMMERCE_FOLLOWUPS = [
         id: 'fu_ecom_cart',
         name: 'E-commerce — Carrinho abandonado',
         active: false,
-        trigger: 'Carrinho Woo',
+        trigger: 'Carrinho (desativado)',
         steps: [
             { id: 's1', type: 'wait', label: 'Esperar 30 min', config: { minutes: '30' } },
             {

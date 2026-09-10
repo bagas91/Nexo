@@ -19,18 +19,43 @@ import FollowUpsView from './components/FollowUpsView';
 import AiAgentsView from './components/AiAgentsView';
 import FlowsView from './components/FlowsView';
 import ContactsView from './components/ContactsView';
-import ConversationsView from './components/ConversationsView';
-import CrmView from './components/CrmView';
+import CrmView, { type CrmTab } from './components/CrmView';
 import CampaignsView from './components/CampaignsView';
 import GroupDispatchView from './components/GroupDispatchView';
+import CatalogQualityView from './components/CatalogQualityView';
+import AdminControlView from './components/AdminControlView';
+import { canAccessView, SETTINGS_TAB_TO_MODULE, userHasModule } from './config/modules';
 
 interface AdminAppProps {
   user: User;
   onLogout: () => void;
 }
 
+function firstAllowedView(user: User): View {
+  if (user.role === 'superadmin') return 'dashboard';
+  const order: View[] = [
+    'dashboard', 'crm', 'contacts', 'campaigns',
+    'catalog', 'templates', 'scheduler', 'groupdispatch',
+    'followups', 'aiagents', 'flows', 'calendar', 'groups', 'history',
+  ];
+  for (const v of order) {
+    if (canAccessView(user, v)) return v;
+  }
+  return 'settings';
+}
+
+function firstAllowedSettingsTab(user: User): SettingsTab {
+  if (user.role === 'superadmin') return 'connections';
+  const order: SettingsTab[] = ['profile', 'atendimento'];
+  for (const t of order) {
+    const mod = SETTINGS_TAB_TO_MODULE[t];
+    if (mod && userHasModule(user, mod)) return t;
+  }
+  return 'profile';
+}
+
 const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
-  const [view, setView] = useState<View>('dashboard');
+  const [view, setView] = useState<View>(() => firstAllowedView(user));
   const [status, setStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
@@ -42,9 +67,21 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
   const [sendProgress, setSendProgress] = useState<SendProgressState | null>(null);
   const [sendProgressDismissed, setSendProgressDismissed] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('connections');
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(() => firstAllowedSettingsTab(user));
+  const [crmTab, setCrmTab] = useState<CrmTab>('atendimento');
+  const isSuperadmin = user.role === 'superadmin';
 
   const backend = BackendService.getInstance();
+
+  const navigateTo = useCallback((v: View) => {
+    if (v === 'conversations') {
+      setCrmTab('atendimento');
+      setView('crm');
+    } else {
+      setView(v);
+    }
+    setIsMobileMenuOpen(false);
+  }, []);
 
   useEffect(() => {
     const pollMs =
@@ -274,33 +311,51 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
     setQrCode(null);
   };
 
-  const noChatViews: View[] = ['library', 'settings', 'whatsapp', 'templates', 'calendar', 'followups', 'aiagents', 'flows', 'contacts', 'conversations', 'crm', 'campaigns'];
+  const noChatViews: View[] = ['library', 'settings', 'whatsapp', 'templates', 'calendar', 'followups', 'aiagents', 'flows', 'contacts', 'conversations', 'crm', 'campaigns', 'catalog', 'admin'];
   const skipChatLoad = noChatViews.includes(view);
   const isConnected = status === ConnectionStatus.CONNECTED;
 
   const goToConnections = () => {
+    if (!isSuperadmin) return;
     setSettingsTab('connections');
     setView('settings');
   };
 
   useEffect(() => {
     if (view === 'whatsapp') {
+      if (!isSuperadmin) {
+        setView(firstAllowedView(user));
+        return;
+      }
       setSettingsTab('connections');
       setView('settings');
     }
-  }, [view]);
+  }, [view, isSuperadmin, user]);
+
+  useEffect(() => {
+    if (view === 'settings') {
+      if (!canAccessView(user, 'settings', settingsTab)) {
+        setSettingsTab(firstAllowedSettingsTab(user));
+      }
+      return;
+    }
+    if (!canAccessView(user, view)) {
+      setView(firstAllowedView(user));
+    }
+  }, [view, settingsTab, user]);
 
   return (
     <ToastProvider>
     <div className="flex h-screen bg-bs-canvas overflow-hidden relative">
       <Sidebar
         currentView={view}
-        setView={(v) => { setView(v); setIsMobileMenuOpen(false); }}
+        setView={navigateTo}
         onLogout={onLogout}
         isOpen={isMobileMenuOpen}
         onClose={() => setIsMobileMenuOpen(false)}
         settingsTab={settingsTab}
         onSettingsTab={setSettingsTab}
+        user={user}
       />
 
       {isMobileMenuOpen && (
@@ -314,15 +369,17 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
               <i className="fa-solid fa-bars text-xl"></i>
             </button>
             <span className="bs-badge-accent shrink-0">Virginia Arruda</span>
-            <button
-              type="button"
-              onClick={goToConnections}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors border shrink-0 text-xs font-semibold ${isConnected ? 'bs-badge-success normal-case' : 'bs-badge-warning normal-case'}`}
-              title="Ir para Conexão WhatsApp"
-            >
-              <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-bs-accent' : 'bg-amber-500'}`} />
-              {isConnected ? 'WhatsApp conectado' : 'WhatsApp offline'}
-            </button>
+            {isSuperadmin && (
+              <button
+                type="button"
+                onClick={goToConnections}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors border shrink-0 text-xs font-semibold ${isConnected ? 'bs-badge-success normal-case' : 'bs-badge-warning normal-case'}`}
+                title="Ir para Conexão WhatsApp"
+              >
+                <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-bs-accent' : 'bg-amber-500'}`} />
+                {isConnected ? 'WhatsApp conectado' : 'WhatsApp offline'}
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2 shrink-0">
             <ThemeToggle />
@@ -331,13 +388,15 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
             </div>
             <div className="text-right hidden sm:block">
               <p className="text-sm font-semibold text-bs-text leading-none">{user.name}</p>
-              <p className="text-[11px] text-bs-muted mt-0.5">Superadmin</p>
+              <p className="text-[11px] text-bs-muted mt-0.5">
+                {isSuperadmin ? 'Superadmin' : 'Usuário'}
+              </p>
             </div>
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 md:p-8 custom-scrollbar">
-          {!isConnected && !noChatViews.includes(view) && view !== 'scheduler' && (
+        <div className="flex-1 overflow-y-auto p-3 md:p-5 custom-scrollbar">
+          {!isConnected && isSuperadmin && !noChatViews.includes(view) && view !== 'scheduler' && (
             <div className="mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg bs-badge-warning normal-case px-4 py-3 text-sm">
               <span>WhatsApp desconectado — conecte para sincronizar grupos e disparar.</span>
               <button type="button" onClick={goToConnections} className="bs-btn px-3 py-1.5 text-xs whitespace-nowrap">
@@ -357,9 +416,11 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
           {view === 'aiagents' && <AiAgentsView />}
           {view === 'flows' && <FlowsView />}
           {view === 'contacts' && <ContactsView />}
-          {view === 'conversations' && <ConversationsView />}
-          {view === 'crm' && <CrmView />}
+          {view === 'crm' && <CrmView tab={crmTab} onTabChange={setCrmTab} />}
+          {view === 'conversations' && <CrmView tab="atendimento" onTabChange={setCrmTab} />}
           {view === 'campaigns' && <CampaignsView />}
+          {view === 'catalog' && <CatalogQualityView />}
+          {view === 'admin' && isSuperadmin && <AdminControlView />}
           {(view === 'settings') && (
             <SettingsView
               tab={settingsTab}
@@ -422,7 +483,17 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
       </main>
 
       {showSendProgressPanel && sendProgress && (
-        <SendProgressPanel progress={sendProgress} onDismiss={() => setSendProgressDismissed(true)} />
+        <SendProgressPanel
+          progress={sendProgress}
+          onDismiss={() => setSendProgressDismissed(true)}
+          onCancel={async () => {
+            try {
+              await backend.stopAllDispatches();
+            } catch (e) {
+              console.error(e);
+            }
+          }}
+        />
       )}
     </div>
     </ToastProvider>

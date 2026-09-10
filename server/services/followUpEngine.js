@@ -130,19 +130,16 @@ function matchesIntegrationTrigger(followUp, { source, eventType }) {
     const evt = String(eventType || '').toLowerCase();
 
     const isCart = evt.includes('cart') || evt.includes('abandon');
-    const isOrder = evt.includes('order') || evt.includes('pedido') || evt.includes('created');
+    const isOrderCreated = evt.includes('order.created') || evt.endsWith('.created');
     const isDelivered = evt.includes('entreg') || evt.includes('completed') || evt.includes('conclu') || evt.includes('enviado');
 
-    if (t.includes('carrinho') && src === 'woocommerce') return isCart;
+    if (t.includes('carrinho') || t.includes('desativado')) return false;
     if (t.includes('pedido entregue') || t.includes('pos-entrega') || t.includes('pós-entrega')) {
-        return isDelivered && (src === 'bling' || src === 'woocommerce');
+        return isDelivered && src === 'bling';
     }
-    if (t.includes('confirma') || (t.includes('pedido') && !t.includes('entregue') && !t.includes('carrinho'))) {
-        if (src === 'woocommerce') return isOrder && !isCart;
-        if (src === 'bling') return !isCart;
-    }
-    if (t.includes('woo') && !t.includes('carrinho')) return src === 'woocommerce' && !isCart;
-    if (t.includes('bling') && !t.includes('entregue')) return src === 'bling';
+    if (t.includes('pedido criado') && src === 'bling') return isOrderCreated;
+    if (t.includes('confirma') && src === 'bling') return isOrderCreated;
+    if (t.includes('bling') && !t.includes('entregue')) return src === 'bling' && isOrderCreated;
     return false;
 }
 
@@ -175,7 +172,13 @@ export async function enrollFollowUp(followUp, { chatId, phone, contactName, con
         stepIndex: 0,
         status: 'active',
         nextRunAt: null,
-        context: { ...context, contactName: contactName || context.contactName || '' },
+        context: {
+            ...context,
+            contactName: contactName || context.contactName || '',
+            // Snapshot permite Fluxos (e edições) sem depender do entity followups
+            stepsSnapshot: Array.isArray(followUp.steps) ? followUp.steps : [],
+            source: context.source || followUp._source || 'followup',
+        },
     });
 
     logger.info(`FollowUp: inscrito — ${followUp.name}`, { chatId: resolvedChatId.slice(0, 16) });
@@ -188,15 +191,25 @@ async function executeStep(run, followUp, step) {
 
     switch (step.type) {
         case 'wait': {
-            const minutes = Math.max(1, Number(step.config?.minutes) || 1);
-            const nextRunAt = Date.now() + minutes * 60 * 1000;
+            const seconds = Number(step.config?.seconds);
+            const minutes = Number(step.config?.minutes);
+            let delayMs;
+            if (Number.isFinite(seconds) && seconds > 0) {
+                delayMs = seconds * 1000;
+            } else {
+                delayMs = Math.max(1, minutes || 1) * 60 * 1000;
+            }
+            const nextRunAt = Date.now() + delayMs;
             chatDB.saveFollowUpRun({
                 ...run,
                 stepIndex: run.stepIndex + 1,
                 status: 'waiting',
                 nextRunAt,
             });
-            logger.info(`FollowUp: aguardando ${minutes}min — ${followUp.name}`, { runId: run.id });
+            logger.info(
+                `FollowUp: aguardando ${Math.round(delayMs / 1000)}s — ${followUp.name}`,
+                { runId: run.id },
+            );
             return 'waiting';
         }
         case 'message': {
@@ -217,6 +230,29 @@ async function executeStep(run, followUp, step) {
         case 'tag': {
             applyTag(run.phone, run.contactName, step.config?.tag);
             logger.info(`FollowUp: tag aplicada — ${step.config?.tag}`, { runId: run.id });
+            return 'continue';
+        }
+        case 'human': {
+            try {
+                chatDB.setInboxConversationMode(run.chatId, 'human');
+                chatDB.setInboxConversationStatus(run.chatId, 'pending');
+            } catch (err) {
+                logger.warn('FollowUp: falha ao transferir humano', err?.message || err);
+            }
+            const handoff = interpolate(step.config?.message || step.config?.text, ctx);
+            if (handoff) {
+                await sendFollowUpMessage(run.chatId, run.phone, handoff);
+                chatDB.saveInboxMessage({
+                    id: `fu_${run.id}_${run.stepIndex}_${Date.now()}`,
+                    chatId: run.chatId,
+                    phone: run.phone,
+                    contactName: run.contactName,
+                    body: handoff,
+                    fromMe: true,
+                    ts: Date.now(),
+                }, { silent: true });
+            }
+            logger.info(`FollowUp: transferido para humano — ${followUp.name}`, { runId: run.id });
             return 'continue';
         }
         case 'webhook': {
@@ -243,13 +279,31 @@ export async function advanceRun(runId) {
     let run = chatDB.getFollowUpRun(runId);
     if (!run || !ACTIVE_STATUSES.has(run.status)) return run;
 
-    const followUp = chatDB.getPlatformEntity('followups', run.followupId);
+    let followUp = chatDB.getPlatformEntity('followups', run.followupId);
+    if (!followUp) {
+        const flow = chatDB.getPlatformEntity('flows', run.followupId);
+        if (flow) {
+            const { flowToExecutable } = await import('./flowEngine.js');
+            followUp = flowToExecutable(flow);
+        }
+    }
     if (!followUp || !followUp.active) {
-        chatDB.saveFollowUpRun({ ...run, status: 'cancelled', nextRunAt: null });
-        return null;
+        // Snapshot ainda permite concluir se o fluxo foi desativado no meio
+        if (!Array.isArray(run.context?.stepsSnapshot) || !run.context.stepsSnapshot.length) {
+            chatDB.saveFollowUpRun({ ...run, status: 'cancelled', nextRunAt: null });
+            return null;
+        }
+        followUp = {
+            id: run.followupId,
+            name: run.followupName,
+            active: true,
+            steps: run.context.stepsSnapshot,
+        };
     }
 
-    const steps = Array.isArray(followUp.steps) ? followUp.steps : [];
+    const steps = Array.isArray(run.context?.stepsSnapshot) && run.context.stepsSnapshot.length
+        ? run.context.stepsSnapshot
+        : (Array.isArray(followUp.steps) ? followUp.steps : []);
 
     while (run.stepIndex < steps.length && ACTIVE_STATUSES.has(run.status)) {
         const step = steps[run.stepIndex];

@@ -7,7 +7,7 @@ import chatDB from '../db/database.js';
 import logger from '../utils/logger.js';
 import {
     exchangeBlingAuthorizationCode,
-    getBlingAccessToken,
+    ensureValidBlingToken,
     getBlingOAuthRedirectUri,
 } from '../services/blingService.js';
 
@@ -39,9 +39,13 @@ function markOAuthStateConsumed(state) {
     chatDB.setPlatformKv(oauthStateKey(state), { ...row, consumedAt: Date.now() });
 }
 
-function hasValidBlingSession() {
-    const cfg = chatDB.getPlatformKv('bling') || {};
-    return Boolean(getBlingAccessToken(cfg));
+async function hasWorkingBlingSession() {
+    try {
+        const token = await ensureValidBlingToken();
+        return Boolean(token);
+    } catch {
+        return false;
+    }
 }
 
 function successHtml(message) {
@@ -75,20 +79,20 @@ export async function handleBlingOAuthCallback(req, res) {
     }
 
     const codeRow = chatDB.getPlatformKv(oauthCodeKey(authCode));
-    if (codeRow?.status === 'success' || hasValidBlingSession()) {
+    if (codeRow?.status === 'success') {
         return res.send(successHtml('Sua conta Bling já está autorizada no Nexo.'));
     }
 
     const stateRow = readOAuthState(authState);
     if (!stateRow) {
-        if (hasValidBlingSession()) {
+        if (await hasWorkingBlingSession()) {
             return res.send(successHtml('Sua conta Bling já está autorizada no Nexo.'));
         }
         return res.status(400).send(errorHtml('State inválido ou expirado. Clique em Autorizar no Bling novamente no painel Nexo.'));
     }
 
     if (stateRow.consumedAt) {
-        if (hasValidBlingSession()) {
+        if (await hasWorkingBlingSession()) {
             return res.send(successHtml('Sua conta Bling já está autorizada no Nexo.'));
         }
         return res.status(400).send(errorHtml('Esta autorização já foi processada. Clique em Autorizar no Bling novamente.'));
@@ -117,7 +121,7 @@ export async function handleBlingOAuthCallback(req, res) {
             connected: true,
             accessToken: tokens.accessToken,
             apiKey: tokens.accessToken,
-            refreshToken: tokens.refreshToken || cfg.refreshToken || '',
+            refreshToken: tokens.refreshToken || '',
             connectedAt: Date.now(),
         };
         chatDB.setPlatformKv('bling', next);
@@ -135,7 +139,7 @@ export async function handleBlingOAuthCallback(req, res) {
     } catch (err) {
         const msg = String(err?.message || err);
         const benignDuplicate = /already been used|já foi utilizado|revoked/i.test(msg);
-        if (benignDuplicate && hasValidBlingSession()) {
+        if (benignDuplicate && await hasWorkingBlingSession()) {
             chatDB.setPlatformKv(oauthCodeKey(authCode), { status: 'success', at: Date.now() });
             logger.info('Bling OAuth: callback duplicado ignorado (sessão já ativa)');
             return res.send(successHtml('Sua conta Bling já está autorizada no Nexo.'));

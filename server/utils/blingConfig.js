@@ -20,7 +20,7 @@ export function mergeBlingConfig(current, incoming) {
         next.accessToken = cur.accessToken || cur.apiKey;
         next.apiKey = cur.apiKey || cur.accessToken;
     }
-    if (cur.refreshToken && !inc.refreshToken) {
+    if (cur.refreshToken && isPlaceholderToken(inc.refreshToken || '')) {
         next.refreshToken = cur.refreshToken;
     }
     if (cur.clientId && !String(inc.clientId || '').trim()) {

@@ -9,7 +9,9 @@ import {
     enrichBlingFromApi,
     resolveBlingMessage,
     mapBlingOrder,
-    getBlingAccessToken,
+    buildBlingMessageContext,
+    ensureValidBlingToken,
+    isBlingOrderEvent,
 } from './blingService.js';
 import {
     parseWooOrder,
@@ -117,8 +119,25 @@ export async function processBlingWebhook(eventType, payload = {}) {
     const cfg = chatDB.getPlatformKv('bling') || {};
     const parsed = parseBlingWebhookBody({ ...payload, event: eventType, tipo: eventType });
 
+    if (!isBlingOrderEvent(parsed.eventType)) {
+        const event = chatDB.addIntegrationEvent({
+            source: 'bling',
+            eventType: parsed.eventType,
+            summary: `Bling: ${parsed.eventType} (ignorado)`,
+            customer: '',
+            phone: '',
+            status: 'skipped',
+            whatsappPreview: '',
+            payloadJson: payload,
+        });
+        logger.info('Bling: evento ignorado (não é pedido de venda)', { eventType: parsed.eventType });
+        return event;
+    }
+
     let order = parsed.order;
-    if (!order?.phone && parsed.orderId && getBlingAccessToken(cfg)) {
+    const token = await ensureValidBlingToken(cfg).catch(() => '');
+    const needsEnrich = parsed.orderId && token && (!order?.phone || !order?.produtos);
+    if (needsEnrich) {
         order = await enrichBlingFromApi(parsed) || order;
     }
     if (!order && payload?.contato) {
@@ -130,18 +149,22 @@ export async function processBlingWebhook(eventType, payload = {}) {
     const status = order?.status || payload?.situacao || payload?.status || '';
     const numero = order?.numero || payload?.numero || parsed.orderId || '';
 
-    const preview = resolveBlingMessage(status, {
+    const messageCtx = {
+        ...buildBlingMessageContext(order),
         customer,
         numero,
         orderId: order?.orderId || parsed.orderId,
         rastreio: order?.rastreio || payload?.rastreio || '',
-    });
+        status,
+    };
+    const preview = resolveBlingMessage(status, messageCtx, parsed.eventType);
 
+    const productHint = messageCtx.primeiroProduto ? ` — ${messageCtx.primeiroProduto}` : '';
     let eventStatus = phone ? 'queued' : 'failed';
     const event = chatDB.addIntegrationEvent({
         source: 'bling',
         eventType: parsed.eventType,
-        summary: `Bling: ${parsed.eventType}${numero ? ` #${numero}` : ''}${status ? ` — ${status}` : ''}`,
+        summary: `Bling: ${parsed.eventType}${numero ? ` #${numero}` : ''}${productHint}${status ? ` — ${status}` : ''}`,
         customer,
         phone,
         status: eventStatus,

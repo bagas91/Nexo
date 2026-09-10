@@ -47,7 +47,9 @@ const FlowsView: React.FC = () => {
       <div className="flex flex-col sm:flex-row sm:justify-between gap-4">
         <div>
           <h2 className="bs-page-title">Fluxos</h2>
-          <p className="bs-page-desc mt-1">Canvas visual — arraste blocos, conecte e salve.</p>
+          <p className="bs-page-desc mt-1">
+            Automação por palavra-chave — mensagem, espera, tag e transferir humano. Ative o fluxo e teste no WhatsApp.
+          </p>
         </div>
         <button type="button" onClick={() => setEditing(createEmptyFlow())} className="bs-btn text-sm px-4 py-2 shrink-0">
           <i className="fa-solid fa-plus mr-2" />Novo Fluxo

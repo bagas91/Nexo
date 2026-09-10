@@ -4,14 +4,24 @@
 
 import express from 'express';
 import chatDB from '../db/database.js';
-import { ensurePlatformDefaults, getWebhookSecret } from '../utils/platformDefaults.js';
+import { ensurePlatformDefaults, getAttendanceConfig, getWebhookSecret } from '../utils/platformDefaults.js';
 import { ensurePlatformSeeds } from '../utils/platformSeeds.js';
 import { ensureEcommerceFollowUps } from '../utils/ecommerceFollowUps.js';
-import { processWooWebhook, processBlingWebhook } from '../services/integrationWebhookService.js';
-import { testBlingConnection, buildBlingAuthorizeUrl, getBlingAccessToken } from '../services/blingService.js';
+import { processBlingWebhook } from '../services/integrationWebhookService.js';
+import { testBlingConnection, buildBlingAuthorizeUrl, ensureValidBlingToken } from '../services/blingService.js';
+import {
+    CRM_STAGES,
+    getCrmProfile,
+    upsertCrmContact,
+    getOrdersForPhone,
+    listCrmDeals,
+    createCrmDeal,
+    updateCrmDeal,
+} from '../services/crmService.js';
 import { createOAuthState, getRedirectUri } from '../routes/blingOAuth.js';
 import { testWooConnection, normalizeStoreUrl } from '../services/wooService.js';
 import { mergeWooConfig, maskWooConfigForClient, hasRealWooCredentials, getWooConsumerKey, getWooConsumerSecret } from '../utils/wooConfig.js';
+import { mergeBlingConfig, maskBlingConfigForClient } from '../utils/blingConfig.js';
 import { requireSuperadmin } from '../middleware/authMiddleware.js';
 import logger from '../utils/logger.js';
 
@@ -44,14 +54,8 @@ webhookRouter.post('/woocommerce', async (req, res) => {
     if (!validateWebhookToken(req)) {
         return res.status(401).json({ error: 'Token de webhook inválido.' });
     }
-    const eventType = req.headers['x-wc-webhook-topic'] || req.body?.event || req.body?.type || 'order.created';
-    try {
-        const event = await processWooWebhook(eventType, req.body || {});
-        res.json({ success: true, eventId: event?.id, status: event?.status });
-    } catch (err) {
-        logger.error('Webhook WooCommerce', err?.message || err);
-        res.status(500).json({ error: err?.message || String(err) });
-    }
+    logger.info('Webhook WooCommerce ignorado — integração desativada (loja é só vitrine)');
+    res.json({ success: true, status: 'skipped', reason: 'WooCommerce desativado — use Bling para pedidos.' });
 });
 
 webhookRouter.post('/bling', async (req, res) => {
@@ -84,6 +88,9 @@ ensurePlatformSeeds();
     }
     if (req.params.key === 'woocommerce' && value) {
         return res.json(maskWooConfigForClient(value));
+    }
+    if (req.params.key === 'attendance') {
+        return res.json(getAttendanceConfig());
     }
     res.json(value);
 });
@@ -169,8 +176,7 @@ router.post('/integration-events/simulate', requireSuperadmin, async (req, res) 
     const { source, eventType, payload } = req.body || {};
     try {
         if (source === 'woocommerce') {
-            const event = await processWooWebhook(eventType || 'order.created', payload || {});
-            return res.json(event);
+            return res.status(410).json({ error: 'WooCommerce desativado — use Bling para simular pedidos.' });
         }
         if (source === 'bling') {
             const event = await processBlingWebhook(eventType || 'pedido.atualizado', payload || {});
@@ -235,8 +241,9 @@ router.put('/woocommerce/credentials', requireSuperadmin, async (req, res) => {
 router.post('/bling/test-connection', requireSuperadmin, async (req, res) => {
     try {
         const cfg = chatDB.getPlatformKv('bling') || {};
-        const token = String(req.body?.accessToken || req.body?.apiKey || '').trim() || getBlingAccessToken(cfg);
-        if (!token) return res.status(400).json({ error: 'Nenhum token Bling configurado. Autorize o app ou cole o token.' });
+        const manual = String(req.body?.accessToken || req.body?.apiKey || '').trim();
+        const token = manual || await ensureValidBlingToken(cfg);
+        if (!token) return res.status(400).json({ error: 'Token Bling expirado. Clique em Autorizar no Bling novamente.' });
         const result = await testBlingConnection(token);
         res.json(result);
     } catch (err) {
@@ -327,6 +334,63 @@ router.post('/followups/:id/enroll', requireSuperadmin, async (req, res) => {
             return res.status(409).json({ error: 'Contato já inscrito neste follow up ou inscrição falhou.' });
         }
         res.json({ success: true, run });
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+// --- CRM (e-commerce + venda assistida WhatsApp) ---
+router.get('/crm/stages', (_req, res) => {
+    res.json({ stages: CRM_STAGES });
+});
+
+router.get('/crm/profile', (req, res) => {
+    try {
+        const phone = String(req.query.phone || '');
+        const name = req.query.name ? String(req.query.name) : undefined;
+        const profile = getCrmProfile(phone, { name });
+        res.json(profile);
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+router.put('/crm/profile', (req, res) => {
+    try {
+        const contact = upsertCrmContact(req.body || {});
+        res.json({ success: true, contact });
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+router.get('/crm/orders', async (req, res) => {
+    try {
+        const phone = String(req.query.phone || '');
+        const result = await getOrdersForPhone(phone);
+        res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err), orders: [] });
+    }
+});
+
+router.get('/crm/deals', (_req, res) => {
+    res.json({ deals: listCrmDeals(), stages: CRM_STAGES });
+});
+
+router.post('/crm/deals', (req, res) => {
+    try {
+        const deal = createCrmDeal(req.body || {});
+        res.status(201).json({ success: true, deal });
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+router.patch('/crm/deals/:id', (req, res) => {
+    try {
+        const deal = updateCrmDeal(req.params.id, req.body || {});
+        res.json({ success: true, deal });
     } catch (err) {
         res.status(400).json({ error: err?.message || String(err) });
     }

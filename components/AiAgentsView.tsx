@@ -18,7 +18,10 @@ NÃO responda perguntas gerais fora do ministério — recuse com gentileza e of
 
 const MODELS = [
   { id: 'support', title: 'Atendimento pastoral', description: 'Tom acolhedor — só ministério e cultos.', icon: 'fa-hands-praying', prompt: PASTORAL_PROMPT, type: 'Atendimento' },
-  { id: 'sales', title: 'Vendas semijoias', description: 'Consultora premium — só loja.', icon: 'fa-gem', prompt: `Consultora virtual ${BRANDING.storeName} (${BRANDING.storeUrl}). Só produtos e compras — recuse culto/oração e conhecimento geral.`, type: 'Vendas' },
+  { id: 'sales', title: 'Vendas semijoias', description: 'Loja Virgínia Arruda — produtos + link; sem ChatGPT genérico.', icon: 'fa-gem', prompt: `Você é a consultora da loja de semijoias Virgínia Arruda (https://virginiaarruda.com) no WhatsApp.
+Tom elegante e breve. Fale SÓ de produtos/loja (e no máximo culto da Bispa: quinta 20h, YouTube/Instagram).
+Use o bloco CATÁLOGO DA LOJA quando existir — mande o link real. Nunca invente preço/estoque/URL.
+Recuse receita, curiosidade, dados pessoais sensíveis e qualquer assunto fora da loja. Ofereça digitar "humano" se precisar da equipe.`, type: 'Vendas' },
   { id: 'faq', title: 'FAQ cultos', description: 'Horários e links — escopo fechado.', icon: 'fa-circle-question', prompt: `FAQ de cultos ${BRANDING.productName}. Só horários, YouTube e como participar — recuse qualquer outro assunto.`, type: 'FAQ' },
 ];
 
@@ -35,6 +38,10 @@ const AiAgentsView: React.FC = () => {
     handoffMessage: '',
     outsideHoursMessage: '',
     businessHours: { enabled: false, start: '08:00', end: '22:00', timezone: 'America/Sao_Paulo' },
+    idleHumanAlertEnabled: true,
+    idleHumanAlertMinutes: 5,
+    idleHumanNotifyCustomer: true,
+    idleHumanCustomerMessage: '',
   });
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<AiAgent | null>(null);

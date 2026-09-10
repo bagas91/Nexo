@@ -44,11 +44,11 @@ const DEFAULT_BLING = {
     notifyNfe: true,
     notifyLowStock: false,
     statusMap: [
-        { blingStatus: 'Em aberto', message: 'Pedido {{numero}} recebido! Estamos preparando.', active: true },
-        { blingStatus: 'Atendido', message: 'Seu pedido {{numero}} foi separado e embalado.', active: true },
-        { blingStatus: 'Enviado', message: 'Pedido enviado! Rastreio: {{rastreio}}', active: true },
-        { blingStatus: 'Entregue', message: `Pedido entregue! Obrigada pela compra na ${BRANDING.storeName}.`, active: true },
-        { blingStatus: 'NF-e autorizada', message: 'Nota fiscal emitida para o pedido {{numero}}.', active: false },
+        { blingStatus: 'Em aberto', message: 'Olá {{nome}}! Pedido #{{numero}} recebido:\n{{produtos}}\nTotal: {{total}}. Estamos preparando.', active: true },
+        { blingStatus: 'Atendido', message: 'Olá {{nome}}! Seu pedido #{{numero}} ({{primeiro_produto}}) foi separado e embalado.', active: true },
+        { blingStatus: 'Enviado', message: 'Olá {{nome}}! Pedido #{{numero}} — {{produtos}} — enviado!\nRastreio: {{rastreio}}', active: true },
+        { blingStatus: 'Entregue', message: `Olá {{nome}}! Pedido #{{numero}} ({{primeiro_produto}}) entregue! Obrigada pela compra na ${BRANDING.storeName}.`, active: true },
+        { blingStatus: 'NF-e autorizada', message: 'Olá {{nome}}! NF-e emitida para o pedido #{{numero}} — {{produtos}}.', active: false },
     ],
 };
 
@@ -72,17 +72,71 @@ const DEFAULT_ATTENDANCE = {
         end: '22:00',
         timezone: 'America/Sao_Paulo',
     },
+    /** Menu inicial estilo venda assistida (primeiro contato). */
+    welcomeMenuEnabled: true,
+    welcomeMenuMessage: `Olá! Aqui é a assistente virtual da loja 💍✨
+
+Como posso te ajudar? Responda com o número ou palavra-chave:
+
+1 — Produto de uma publicação ou do site 📱
+2 — Ver semijoias e alianças 💍
+3 — Meu pedido / rastreio 🛒
+4 — Falar com um atendente 👤`,
+    idleHumanAlertEnabled: true,
+    idleHumanAlertMinutes: 5,
+    idleHumanNotifyCustomer: true,
+    idleHumanCustomerMessage:
+        'Desculpe a demora! Já chamei um atendente humano para te ajudar. Em instantes alguém assume por aqui. 🙏',
 };
 
 export function getAttendanceConfig() {
     ensurePlatformDefaults();
-    return chatDB.getPlatformKv('attendance') || DEFAULT_ATTENDANCE;
+    const stored = chatDB.getPlatformKv('attendance') || {};
+    return {
+        ...DEFAULT_ATTENDANCE,
+        ...stored,
+        businessHours: {
+            ...DEFAULT_ATTENDANCE.businessHours,
+            ...(stored.businessHours || {}),
+        },
+        humanKeywords: Array.isArray(stored.humanKeywords)
+            ? stored.humanKeywords
+            : DEFAULT_ATTENDANCE.humanKeywords,
+        welcomeMenuEnabled: stored.welcomeMenuEnabled !== undefined
+            ? !!stored.welcomeMenuEnabled
+            : DEFAULT_ATTENDANCE.welcomeMenuEnabled,
+        welcomeMenuMessage: stored.welcomeMenuMessage || DEFAULT_ATTENDANCE.welcomeMenuMessage,
+    };
+}
+
+/** Garante WooCommerce de volta na lista (foi retirado quando a loja era só vitrine). */
+export function restoreWooCommerceIntegration() {
+    const meta = chatDB.getPlatformKv('platform_meta') || {};
+    const integrations = chatDB.getPlatformKv('integrations') || [];
+    const hasWoo = integrations.some((i) => i.id === 'woocommerce');
+    if (!hasWoo) {
+        chatDB.setPlatformKv('integrations', [{ id: 'woocommerce', connected: false }, ...integrations]);
+    }
+
+    const woo = chatDB.getPlatformKv('woocommerce');
+    if (woo?.retired) {
+        const { retired, ...rest } = woo;
+        chatDB.setPlatformKv('woocommerce', { ...rest, retired: false });
+    } else if (!woo) {
+        chatDB.setPlatformKv('woocommerce', DEFAULT_WOO);
+    }
+
+    if (meta.wooRetired) {
+        const { wooRetired, ...rest } = meta;
+        chatDB.setPlatformKv('platform_meta', { ...rest, wooRestored: Date.now() });
+    }
 }
 
 export function ensurePlatformDefaults() {
     if (!chatDB.getPlatformKv('integrations')) {
         chatDB.setPlatformKv('integrations', DEFAULT_INTEGRATIONS);
     }
+    restoreWooCommerceIntegration();
     if (!chatDB.getPlatformKv('woocommerce')) {
         chatDB.setPlatformKv('woocommerce', DEFAULT_WOO);
     }

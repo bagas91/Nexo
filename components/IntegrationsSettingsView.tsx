@@ -1,19 +1,11 @@
 import React from 'react';
 import { useToast } from '../contexts/ToastContext';
 import { useIntegrationEvents, usePlatformKv } from '../hooks/usePlatformData';
-import type { BlingConfig, IntegrationConfig, WooCommerceConfig } from '../services/mockStore';
+import type { BlingConfig, IntegrationConfig } from '../services/mockStore';
 import type { SettingsTab } from './SettingsView';
 import IntegrationEventLog from './IntegrationEventLog';
 
 const INTEGRATIONS_FALLBACK: IntegrationConfig[] = [];
-
-const WOO_FALLBACK: WooCommerceConfig = {
-  connected: false,
-  storeUrl: '',
-  consumerKey: '',
-  consumerSecret: '',
-  events: {},
-};
 
 const BLING_FALLBACK: BlingConfig = {
   connected: false,
@@ -28,14 +20,14 @@ const BLING_FALLBACK: BlingConfig = {
 const META: Record<string, { name: string; icon: string; desc: string; featured?: boolean }> = {
   woocommerce: {
     name: 'WooCommerce',
-    icon: 'fa-bag-shopping',
-    desc: 'Pedidos, carrinho abandonado e pós-venda na loja.',
+    icon: 'fa-brands fa-wordpress',
+    desc: 'REST API + webhooks da loja. Usado no Comparador e nas regras Bling × Woo.',
     featured: true,
   },
   bling: {
     name: 'Bling ERP',
     icon: 'fa-boxes-stacked',
-    desc: 'NF-e, rastreio, estoque e status operacional.',
+    desc: 'Pedidos, NF-e, rastreio, estoque e status operacional.',
     featured: true,
   },
   calendar: { name: 'Google Calendar', icon: 'fa-calendar', desc: 'Sincronize cultos e eventos.' },
@@ -56,12 +48,13 @@ interface IntegrationsSettingsViewProps {
 const IntegrationsSettingsView: React.FC<IntegrationsSettingsViewProps> = ({ onTabChange }) => {
   const { showToast } = useToast();
   const { value: integrations, save: saveIntegrations, loading } = usePlatformKv<IntegrationConfig[]>('integrations', INTEGRATIONS_FALLBACK);
-  const { value: wooCfg } = usePlatformKv<WooCommerceConfig>('woocommerce', WOO_FALLBACK);
   const { value: blingCfg } = usePlatformKv<BlingConfig>('bling', BLING_FALLBACK);
+  const { value: wooCfg } = usePlatformKv<{ connected?: boolean }>('woocommerce', { connected: false });
   const { events } = useIntegrationEvents();
 
-  const featured = integrations.filter((i) => META[i.id]?.featured);
-  const others = integrations.filter((i) => !META[i.id]?.featured);
+  const visible = integrations.filter((i) => META[i.id]);
+  const featured = visible.filter((i) => META[i.id]?.featured);
+  const others = visible.filter((i) => !META[i.id]?.featured);
 
   const toggleIntegration = async (id: string) => {
     const item = integrations.find((i) => i.id === id);
@@ -85,8 +78,8 @@ const IntegrationsSettingsView: React.FC<IntegrationsSettingsViewProps> = ({ onT
     const meta = META[item.id] || { name: item.id, icon: 'fa-plug', desc: '' };
     const detailTab = DETAIL_TABS[item.id];
     const isConnected = item.connected
-      || (item.id === 'woocommerce' && (wooCfg.connected || wooCfg.credentialsConfigured))
-      || (item.id === 'bling' && blingCfg.connected);
+      || (item.id === 'bling' && blingCfg.connected)
+      || (item.id === 'woocommerce' && !!wooCfg.connected);
 
     return (
       <div key={item.id} className={`bs-card p-5 flex flex-col ${large ? 'lg:col-span-1' : ''}`}>
@@ -135,7 +128,9 @@ const IntegrationsSettingsView: React.FC<IntegrationsSettingsViewProps> = ({ onT
     <div className="space-y-6 animate-fadeIn max-w-4xl">
       <div>
         <h2 className="bs-page-title">Integrações</h2>
-        <p className="bs-page-desc mt-1">E-commerce, ERP e ferramentas conectadas ao WhatsApp.</p>
+        <p className="bs-page-desc mt-1">
+          ERP, loja WooCommerce e ferramentas conectadas ao WhatsApp. O Comparador do catálogo usa a REST API do Woo.
+        </p>
       </div>
 
       <div>

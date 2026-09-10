@@ -1,9 +1,10 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { SendProgressState } from '../types';
 
 interface SendProgressPanelProps {
   progress: SendProgressState;
   onDismiss?: () => void;
+  onCancel?: () => void | Promise<void>;
   compact?: boolean;
 }
 
@@ -17,8 +18,9 @@ function formatTime(ts: number) {
   return new Date(ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-const SendProgressPanel: React.FC<SendProgressPanelProps> = ({ progress, onDismiss, compact = false }) => {
+const SendProgressPanel: React.FC<SendProgressPanelProps> = ({ progress, onDismiss, onCancel, compact = false }) => {
   const logRef = useRef<HTMLDivElement>(null);
+  const [cancelling, setCancelling] = useState(false);
   const isRunning = progress.active || progress.status === 'running';
   const isFinished = progress.status === 'completed' || progress.status === 'failed';
 
@@ -28,7 +30,22 @@ const SendProgressPanel: React.FC<SendProgressPanelProps> = ({ progress, onDismi
     }
   }, [progress.log.length, progress.current]);
 
+  useEffect(() => {
+    if (!isRunning) setCancelling(false);
+  }, [isRunning]);
+
   if (progress.status === 'idle' && !progress.active) return null;
+
+  const handleCancel = async () => {
+    if (!onCancel || cancelling) return;
+    if (!confirm('Cancelar o envio em andamento? Os destinos restantes serão marcados como falha.')) return;
+    setCancelling(true);
+    try {
+      await onCancel();
+    } catch {
+      setCancelling(false);
+    }
+  };
 
   return (
     <div
@@ -53,23 +70,37 @@ const SendProgressPanel: React.FC<SendProgressPanelProps> = ({ progress, onDismi
               <i className="fa-solid fa-circle-check text-bs-accent" />
             )}
             <p className="font-bold text-bs-text text-sm truncate">
-              {isRunning ? 'Enviando mensagens…' : progress.failed > 0 ? 'Envio concluído com falhas' : 'Envio concluído'}
+              {isRunning
+                ? (cancelling ? 'Cancelando envio…' : 'Enviando mensagens…')
+                : progress.failed > 0 ? 'Envio concluído com falhas' : 'Envio concluído'}
             </p>
           </div>
           {progress.sourceLabel && (
             <p className="text-xs text-bs-muted mt-0.5 truncate">{progress.sourceLabel}</p>
           )}
         </div>
-        {onDismiss && !isRunning && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="shrink-0 w-8 h-8 rounded-lg hover:bg-bs-hover text-bs-muted flex items-center justify-center"
-            aria-label="Fechar"
-          >
-            <i className="fa-solid fa-times" />
-          </button>
-        )}
+        <div className="flex items-center gap-1 shrink-0">
+          {isRunning && onCancel && (
+            <button
+              type="button"
+              onClick={() => void handleCancel()}
+              disabled={cancelling}
+              className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-rose-500 text-white hover:bg-rose-600 disabled:opacity-60"
+            >
+              {cancelling ? '…' : 'Cancelar'}
+            </button>
+          )}
+          {onDismiss && !isRunning && (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="w-8 h-8 rounded-lg hover:bg-bs-hover text-bs-muted flex items-center justify-center"
+              aria-label="Fechar"
+            >
+              <i className="fa-solid fa-times" />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="px-4 py-3 space-y-3">

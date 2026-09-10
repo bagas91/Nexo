@@ -11,8 +11,14 @@ export interface User {
   id: string;
   email: string;
   name: string;
-  role?: 'superadmin' | 'creator' | 'admin' | 'user';
+  role?: 'superadmin' | 'operator' | 'creator' | 'admin' | 'user';
   active?: boolean;
+  modules?: string[];
+  createdAt?: number;
+  lastLoginAt?: number | null;
+  tokenVersion?: number;
+  /** WhatsApp do operador (DDI+DDD+número) — notificação Fila Goiânia */
+  phone?: string | null;
 }
 
 export type ContentItemStatus = 'draft' | 'review' | 'approved';
@@ -134,7 +140,7 @@ export interface DispatchEntry {
   createdAt: number;
 }
 
-export type View = 'dashboard' | 'groups' | 'groupdispatch' | 'scheduler' | 'history' | 'settings' | 'categories' | 'library' | 'users' | 'whatsapp' | 'assistant' | 'templates' | 'calendar' | 'followups' | 'aiagents' | 'flows' | 'contacts' | 'conversations' | 'crm' | 'campaigns';
+export type View = 'dashboard' | 'groups' | 'groupdispatch' | 'scheduler' | 'history' | 'settings' | 'categories' | 'library' | 'users' | 'whatsapp' | 'assistant' | 'templates' | 'calendar' | 'followups' | 'aiagents' | 'flows' | 'contacts' | 'conversations' | 'crm' | 'campaigns' | 'catalog' | 'admin';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';

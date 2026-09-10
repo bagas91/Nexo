@@ -152,18 +152,20 @@ function FlowNodeCard({ data, selected }: NodeProps<Node<FlowNodeData>>) {
           <>
             <p>Quando o fluxo será ativado?</p>
             <div className="rounded-lg border border-bs-border px-2 py-1.5 text-xs text-bs-text bg-bs-elevated">
-              {data.config.trigger || 'Qualquer mensagem recebida'}
+              {data.config.triggerMode === 'any'
+                ? 'Qualquer mensagem'
+                : data.config.triggerMode === 'new'
+                  ? 'Novo contato'
+                  : (data.config.keyword ? `Palavra-chave: ${data.config.keyword}` : (data.config.trigger || 'Palavra-chave'))}
             </div>
-            {!data.config.connection && (
-              <p className="text-[10px] rounded px-2 py-1" style={{ color: 'var(--bs-danger-text)', background: 'var(--bs-danger-bg)' }}>
-                Nenhuma conexão selecionada
-              </p>
-            )}
           </>
         )}
-        {isAi && <p className="text-bs-subtle italic">Clique para selecionar agente</p>}
-        {kind === 'message' && data.config.text && <p className="line-clamp-2 text-bs-text">{data.config.text}</p>}
+        {isAi && <p className="text-bs-subtle italic">Ainda não executa no MVP</p>}
+        {kind === 'message' && (
+          <p className="line-clamp-2 text-bs-text">{data.config.text || 'Clique para editar o texto'}</p>
+        )}
         {kind === 'delay' && <p>Esperar {data.config.seconds || '30'}s</p>}
+        {kind === 'tag' && <p>Tag: {data.config.tag || '—'}</p>}
         {isEnd && <p className="text-bs-subtle">Fim do fluxo</p>}
       </div>
       {!isEnd && (
@@ -187,11 +189,14 @@ function BuilderBody({ draft, setDraftMeta, onSave, onClose, onDelete }: Builder
   const initial = useMemo(() => flowToReactFlow(draft), [draft.id]);
   const [nodes, setNodes, onNodesChange] = useNodesState(initial.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initial.edges);
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const { screenToFlowPosition } = useReactFlow();
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   nodesRef.current = nodes;
   edgesRef.current = edges;
+
+  const selected = nodes.find((n) => n.id === selectedId) || null;
 
   const edgeDefaults = {
     type: 'smoothstep' as const,
@@ -225,8 +230,42 @@ function BuilderBody({ draft, setDraftMeta, onSave, onClose, onDelete }: Builder
     e.dataTransfer.effectAllowed = 'move';
   };
 
+  const patchSelected = (patch: Partial<FlowNodeData> & { config?: Record<string, string> }) => {
+    if (!selectedId) return;
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id !== selectedId) return n;
+        return {
+          ...n,
+          data: {
+            ...n.data,
+            ...patch,
+            config: { ...n.data.config, ...(patch.config || {}) },
+          },
+        };
+      }),
+    );
+  };
+
   const handleSave = () => {
-    onSave(reactFlowToFlow(draft, nodesRef.current, edgesRef.current));
+    const next = reactFlowToFlow(draft, nodesRef.current, edgesRef.current);
+    // Sync trigger string from trigger node
+    const triggerNode = nodesRef.current.find((n) => n.data.blockType === 'trigger');
+    if (triggerNode) {
+      const mode = triggerNode.data.config.triggerMode || 'keyword';
+      const kw = triggerNode.data.config.keyword || '';
+      if (mode === 'keyword') {
+        next.trigger = kw ? `Palavra-chave: ${kw}` : 'Palavra-chave';
+        next.triggerConfig = { ...triggerNode.data.config, trigger: next.trigger, keyword: kw };
+      } else if (mode === 'any') {
+        next.trigger = 'Qualquer mensagem recebida';
+        next.triggerConfig = { ...triggerNode.data.config, trigger: next.trigger };
+      } else if (mode === 'new') {
+        next.trigger = 'Novo contato';
+        next.triggerConfig = { ...triggerNode.data.config, trigger: next.trigger };
+      }
+    }
+    onSave(next);
   };
 
   return (
@@ -272,7 +311,7 @@ function BuilderBody({ draft, setDraftMeta, onSave, onClose, onDelete }: Builder
             ))}
           </div>
           <p className="px-3 pb-4 text-[10px] text-bs-subtle leading-relaxed">
-            Arraste para o canvas. Conecte arrastando dos pontos verdes.
+            MVP executa: mensagem, espera, tag, humano, webhook. Clique no bloco para editar.
           </p>
         </aside>
 
@@ -283,6 +322,7 @@ function BuilderBody({ draft, setDraftMeta, onSave, onClose, onDelete }: Builder
             onNodesChange={onNodesChange}
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
+            onSelectionChange={({ nodes: sel }) => setSelectedId(sel[0]?.id || null)}
             nodeTypes={nodeTypes}
             fitView
             fitViewOptions={{ padding: 0.35 }}
@@ -294,6 +334,121 @@ function BuilderBody({ draft, setDraftMeta, onSave, onClose, onDelete }: Builder
             <Controls className="flow-controls" showInteractive={false} />
           </ReactFlow>
         </div>
+
+        <aside className="w-64 lg:w-72 shrink-0 border-l border-bs-border bg-bs-shell overflow-y-auto custom-scrollbar p-3 hidden sm:block">
+          <p className="text-[10px] font-bold uppercase tracking-widest text-bs-subtle mb-3">Propriedades</p>
+          {!selected ? (
+            <p className="text-xs text-bs-muted">Selecione um bloco no canvas para editar.</p>
+          ) : (
+            <div className="space-y-3 text-sm">
+              <div>
+                <label className="text-[11px] text-bs-muted font-semibold">Rótulo</label>
+                <input
+                  className="bs-input text-xs py-1.5 mt-1"
+                  value={selected.data.label}
+                  onChange={(e) => patchSelected({ label: e.target.value })}
+                />
+              </div>
+
+              {selected.data.blockType === 'trigger' && (
+                <>
+                  <div>
+                    <label className="text-[11px] text-bs-muted font-semibold">Quando disparar</label>
+                    <select
+                      className="bs-input text-xs py-1.5 mt-1"
+                      value={selected.data.config.triggerMode || (selected.data.config.keyword ? 'keyword' : 'any')}
+                      onChange={(e) => patchSelected({ config: { triggerMode: e.target.value } })}
+                    >
+                      <option value="keyword">Palavra-chave</option>
+                      <option value="any">Qualquer mensagem</option>
+                      <option value="new">Novo contato</option>
+                    </select>
+                  </div>
+                  {(selected.data.config.triggerMode || 'keyword') === 'keyword' && (
+                    <div>
+                      <label className="text-[11px] text-bs-muted font-semibold">Palavra-chave</label>
+                      <input
+                        className="bs-input text-xs py-1.5 mt-1"
+                        placeholder="ex.: oração, rastreio, preço"
+                        value={selected.data.config.keyword || ''}
+                        onChange={(e) => patchSelected({ config: { keyword: e.target.value } })}
+                      />
+                      <p className="text-[10px] text-bs-subtle mt-1">Dispara se a mensagem do cliente contiver este texto.</p>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {selected.data.blockType === 'message' && (
+                <div>
+                  <label className="text-[11px] text-bs-muted font-semibold">Texto da mensagem</label>
+                  <textarea
+                    className="bs-input text-xs py-1.5 mt-1 min-h-[100px]"
+                    placeholder="Olá {{name}}! …"
+                    value={selected.data.config.text || ''}
+                    onChange={(e) => patchSelected({ config: { text: e.target.value } })}
+                  />
+                  <p className="text-[10px] text-bs-subtle mt-1">Use {"{{name}}"} para o nome do contato.</p>
+                </div>
+              )}
+
+              {selected.data.blockType === 'delay' && (
+                <div>
+                  <label className="text-[11px] text-bs-muted font-semibold">Esperar (segundos)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    className="bs-input text-xs py-1.5 mt-1"
+                    value={selected.data.config.seconds || '30'}
+                    onChange={(e) => patchSelected({ config: { seconds: e.target.value } })}
+                  />
+                </div>
+              )}
+
+              {selected.data.blockType === 'tag' && (
+                <div>
+                  <label className="text-[11px] text-bs-muted font-semibold">Tag</label>
+                  <input
+                    className="bs-input text-xs py-1.5 mt-1"
+                    placeholder="ex.: oracao"
+                    value={selected.data.config.tag || ''}
+                    onChange={(e) => patchSelected({ config: { tag: e.target.value } })}
+                  />
+                </div>
+              )}
+
+              {selected.data.blockType === 'webhook' && (
+                <div>
+                  <label className="text-[11px] text-bs-muted font-semibold">URL do webhook</label>
+                  <input
+                    className="bs-input text-xs py-1.5 mt-1"
+                    placeholder="https://…"
+                    value={selected.data.config.url || ''}
+                    onChange={(e) => patchSelected({ config: { url: e.target.value } })}
+                  />
+                </div>
+              )}
+
+              {selected.data.blockType === 'human' && (
+                <div>
+                  <label className="text-[11px] text-bs-muted font-semibold">Mensagem ao transferir (opcional)</label>
+                  <textarea
+                    className="bs-input text-xs py-1.5 mt-1 min-h-[72px]"
+                    placeholder="Vou te passar para um atendente…"
+                    value={selected.data.config.text || selected.data.config.message || ''}
+                    onChange={(e) => patchSelected({ config: { text: e.target.value, message: e.target.value } })}
+                  />
+                </div>
+              )}
+
+              {(selected.data.blockType === 'ai' || selected.data.blockType === 'audio' || selected.data.blockType === 'condition') && (
+                <p className="text-[11px] text-amber-700 dark:text-amber-300 bg-amber-500/10 border border-amber-400/40 rounded-lg px-2 py-2">
+                  Este bloco ainda não executa no MVP. Use mensagem / espera / tag / humano.
+                </p>
+              )}
+            </div>
+          )}
+        </aside>
       </div>
     </div>
   );
@@ -322,21 +477,31 @@ export function createEmptyFlow(): Flow {
     id: `fl_${Date.now()}`,
     name: 'Atendimento automático',
     active: false,
-    trigger: 'Qualquer mensagem recebida',
-    triggerConfig: { connection: '' },
-    blocks: [{ id: 'b_ai', type: 'ai', label: 'Agente de IA', config: { agentId: '' } }],
+    trigger: 'Palavra-chave: oi',
+    triggerConfig: { triggerMode: 'keyword', keyword: 'oi', trigger: 'Palavra-chave: oi', connection: 'whatsapp' },
+    blocks: [
+      { id: 'b_msg', type: 'message', label: 'Enviar Mensagem', config: { text: 'Olá {{name}}! Como posso te ajudar? Digite *humano* se preferir falar com a equipe.' } },
+    ],
     nodes: [
       {
         id: 'trigger',
         type: 'flowNode',
         position: { x: 280, y: 40 },
-        data: { blockType: 'trigger', label: 'Gatilho inicial', config: { trigger: 'Qualquer mensagem recebida', connection: '' } },
+        data: {
+          blockType: 'trigger',
+          label: 'Gatilho inicial',
+          config: { triggerMode: 'keyword', keyword: 'oi', trigger: 'Palavra-chave: oi', connection: 'whatsapp' },
+        },
       },
       {
-        id: 'b_ai',
+        id: 'b_msg',
         type: 'flowNode',
         position: { x: 280, y: 220 },
-        data: { blockType: 'ai', label: 'Agente de IA', config: { agentId: '' } },
+        data: {
+          blockType: 'message',
+          label: 'Enviar Mensagem',
+          config: { text: 'Olá {{name}}! Como posso te ajudar? Digite *humano* se preferir falar com a equipe.' },
+        },
       },
       {
         id: 'end',
@@ -346,8 +511,8 @@ export function createEmptyFlow(): Flow {
       },
     ],
     edges: [
-      { id: 'e_t_ai', source: 'trigger', target: 'b_ai' },
-      { id: 'e_ai_end', source: 'b_ai', target: 'end' },
+      { id: 'e_t_msg', source: 'trigger', target: 'b_msg' },
+      { id: 'e_msg_end', source: 'b_msg', target: 'end' },
     ],
     createdAt: Date.now(),
   };
