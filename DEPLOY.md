@@ -1,5 +1,21 @@
 # ZapFlow — Deploy e produção
 
+## Bootstrap rápido (VPS nova)
+
+Na pasta do projeto (já clonada):
+
+```bash
+chmod +x scripts/bootstrap-vps.sh
+./scripts/bootstrap-vps.sh
+# ou: npm run bootstrap:vps
+```
+
+O script: checa Node 18+, cria `server/.env` se faltar, `npm run install:all`, `npm run build`, sobe/recarrega PM2 (`instances: 1`).
+
+Opções: `--skip-build` · `--no-pm2` · `--env-only`
+
+Depois edite `server/.env` (ADMIN_PASS, AUTH_SECRET, GEMINI_API_KEY) e abra `http://IP:3001`.
+
 ## PM2: uma única instância
 
 O worker de agendamentos roda dentro do mesmo processo do backend. **Só pode haver uma instância** do app rodando.

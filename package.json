@@ -25,6 +25,7 @@
     "logs:status": "./scripts/monitor-logs.sh --status",
     "logs:today": "./scripts/monitor-logs.sh --today",
     "install:all": "npm install && cd server && npm install",
+    "bootstrap:vps": "bash scripts/bootstrap-vps.sh",
     "check:ops": "./scripts/check-zapflow.sh",
     "check:ops:watch": "./scripts/check-zapflow.sh --watch",
     "check:ops:rescue": "./scripts/check-zapflow.sh --rescue"

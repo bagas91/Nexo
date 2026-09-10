@@ -51,13 +51,15 @@ O backend sobe com **PM2** e já serve a interface. Você só acessa **http://lo
 
 | Comando | O que faz |
 |---------|-----------|
+| `npm run bootstrap:vps` | **VPS nova:** install + build + PM2 (cria `.env` se faltar) |
 | `npm run pm2:start` | Liga o sistema (backend + interface). Depois acesse http://localhost:3001 |
-| `npm run pm2:restart` | Reinicia o sistema (use depois de mudar código e rodar `build`) |
+| `npm run pm2:reload` | Recarrega com graceful shutdown (preferir após deploy) |
+| `npm run pm2:restart` | Reinicia o sistema |
 | `npm run pm2:stop` | Desliga o sistema |
-| `npm run build` | Gera a versão nova do frontend (rode antes de `pm2:restart` quando mudar código) |
-| `npm run install:all` | Instala dependências (só quando clonar o projeto ou adicionar pacotes) |
-| `npm run logs:live` | Mostra os logs do backend em tempo real (para debug) |
-| `npm run fix:browser-lock` | Se der erro "browser is already running": para o backend, roda isso, depois `pm2:start` de novo |
+| `npm run build` | Gera a versão nova do frontend |
+| `npm run install:all` | Instala dependências |
+| `npm run logs:live` | Mostra os logs do backend em tempo real |
+| `npm run fix:browser-lock` | Se der erro "browser is already running" |
 
 ---
 
