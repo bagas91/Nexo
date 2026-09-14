@@ -28,7 +28,9 @@
     "bootstrap:vps": "bash scripts/bootstrap-vps.sh",
     "check:ops": "./scripts/check-zapflow.sh",
     "check:ops:watch": "./scripts/check-zapflow.sh --watch",
-    "check:ops:rescue": "./scripts/check-zapflow.sh --rescue"
+    "check:ops:rescue": "./scripts/check-zapflow.sh --rescue",
+    "perf:check": "bash scripts/perf-check.sh",
+    "perf:watch": "bash scripts/perf-check.sh --watch"
   },
   "dependencies": {
     "@google/genai": "^1.38.0",
