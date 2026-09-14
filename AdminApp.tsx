@@ -60,6 +60,10 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairingPhone, setPairingPhone] = useState<string | null>(null);
+  const [ecommerceStatus, setEcommerceStatus] = useState<ConnectionStatus>(ConnectionStatus.DISCONNECTED);
+  const [ecommerceQr, setEcommerceQr] = useState<string | null>(null);
+  const [ecommercePairingCode, setEcommercePairingCode] = useState<string | null>(null);
+  const [ecommercePairingPhone, setEcommercePairingPhone] = useState<string | null>(null);
   const [chats, setChats] = useState<ChatEntity[]>([]);
   const [schedules, setSchedules] = useState<ScheduledMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -84,45 +88,64 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
   }, []);
 
   useEffect(() => {
-    const pollMs =
-      status === ConnectionStatus.QR_READY || status === ConnectionStatus.PAIRING_CODE_READY ? 4000 : 1500;
+    const busy =
+      status === ConnectionStatus.QR_READY
+      || status === ConnectionStatus.PAIRING_CODE_READY
+      || ecommerceStatus === ConnectionStatus.QR_READY
+      || ecommerceStatus === ConnectionStatus.PAIRING_CODE_READY;
+    const pollMs = busy ? 4000 : 1500;
     const interval = setInterval(async () => {
       try {
         const statusData = await backend.getStatus();
-        const currentStatus = statusData.status;
+        const dispatchInst = statusData.instances?.dispatch;
+        const ecomInst = statusData.instances?.ecommerce;
 
-        if (statusData.qr && currentStatus === ConnectionStatus.QR_READY) {
+        const currentStatus = (dispatchInst?.status || statusData.status) as ConnectionStatus;
+        if (dispatchInst?.qr && currentStatus === ConnectionStatus.QR_READY) {
+          setQrCode(dispatchInst.qr);
+        } else if (statusData.qr && currentStatus === ConnectionStatus.QR_READY) {
           setQrCode(statusData.qr);
         }
-
-        if (statusData.pairingCode && currentStatus === ConnectionStatus.PAIRING_CODE_READY) {
+        if (dispatchInst?.pairingCode && currentStatus === ConnectionStatus.PAIRING_CODE_READY) {
+          setPairingCode(dispatchInst.pairingCode);
+          if (dispatchInst.pairingPhone) setPairingPhone(dispatchInst.pairingPhone);
+        } else if (statusData.pairingCode && currentStatus === ConnectionStatus.PAIRING_CODE_READY) {
           setPairingCode(statusData.pairingCode);
           if (statusData.pairingPhone) setPairingPhone(statusData.pairingPhone);
         }
-
         if (currentStatus === ConnectionStatus.DISCONNECTED && status !== ConnectionStatus.DISCONNECTED) {
           setStatus(ConnectionStatus.DISCONNECTED);
           setQrCode(null);
           setPairingCode(null);
           setPairingPhone(null);
-          return;
-        }
-
-        if (currentStatus === ConnectionStatus.CONNECTED && status !== ConnectionStatus.CONNECTED) {
+        } else if (currentStatus === ConnectionStatus.CONNECTED && status !== ConnectionStatus.CONNECTED) {
           setStatus(ConnectionStatus.CONNECTED);
           setQrCode(null);
           setPairingCode(null);
           setPairingPhone(null);
-          return;
-        }
-
-        if (currentStatus === ConnectionStatus.CONNECTING && status === ConnectionStatus.QR_READY) {
+        } else if (currentStatus === ConnectionStatus.CONNECTING && status === ConnectionStatus.QR_READY) {
           setStatus(ConnectionStatus.CONNECTING);
-          return;
+        } else if (currentStatus !== status && currentStatus !== ConnectionStatus.CONNECTED) {
+          setStatus(currentStatus);
         }
 
-        if (currentStatus !== status && currentStatus !== ConnectionStatus.CONNECTED) {
-          setStatus(currentStatus);
+        if (ecomInst) {
+          const eStatus = ecomInst.status as ConnectionStatus;
+          if (ecomInst.qr && eStatus === ConnectionStatus.QR_READY) setEcommerceQr(ecomInst.qr);
+          if (ecomInst.pairingCode && eStatus === ConnectionStatus.PAIRING_CODE_READY) {
+            setEcommercePairingCode(ecomInst.pairingCode);
+            if (ecomInst.pairingPhone) setEcommercePairingPhone(ecomInst.pairingPhone);
+          }
+          if (eStatus === ConnectionStatus.CONNECTED) {
+            setEcommerceStatus(ConnectionStatus.CONNECTED);
+            setEcommerceQr(null);
+            setEcommercePairingCode(null);
+            setEcommercePairingPhone(null);
+          } else if (eStatus === ConnectionStatus.DISCONNECTED) {
+            setEcommerceStatus(ConnectionStatus.DISCONNECTED);
+          } else {
+            setEcommerceStatus(eStatus);
+          }
         }
       } catch (err) {
         console.error('Erro ao verificar status:', err);
@@ -130,7 +153,7 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
     }, pollMs);
 
     return () => clearInterval(interval);
-  }, [status, backend]);
+  }, [status, ecommerceStatus, backend]);
 
   useEffect(() => {
     if (user && status === ConnectionStatus.CONNECTED) {
@@ -223,32 +246,54 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
     setIsLoading(false);
   };
 
-  const handleConnect = async () => {
+  const handleConnect = async (role: 'dispatch' | 'ecommerce' = 'dispatch') => {
+    const setSt = role === 'ecommerce' ? setEcommerceStatus : setStatus;
+    const setQr = role === 'ecommerce' ? setEcommerceQr : setQrCode;
     try {
-      setStatus(ConnectionStatus.CONNECTING);
-      let qr = await backend.connect();
+      setSt(ConnectionStatus.CONNECTING);
+      await backend.reconnect(role);
+      let qr = await backend.connect(role);
       if (qr) {
-        setQrCode(qr);
-        setStatus(ConnectionStatus.QR_READY);
+        setQr(qr);
+        setSt(ConnectionStatus.QR_READY);
         return;
       }
-      setQrCode(null);
-      await backend.reconnect();
+      setQr(null);
       for (let i = 0; i < 12; i++) {
         await new Promise(resolve => setTimeout(resolve, 2000));
-        qr = await backend.connect();
+        qr = await backend.connect(role);
         if (qr) {
-          setQrCode(qr);
-          setStatus(ConnectionStatus.QR_READY);
+          setQr(qr);
+          setSt(ConnectionStatus.QR_READY);
           return;
         }
       }
-      setStatus(ConnectionStatus.DISCONNECTED);
+      setSt(ConnectionStatus.DISCONNECTED);
       alert('Não foi possível gerar o QR Code. Verifique se o servidor está rodando.');
     } catch (err) {
       console.error('Erro ao conectar:', err);
-      setStatus(ConnectionStatus.DISCONNECTED);
+      setSt(ConnectionStatus.DISCONNECTED);
     }
+  };
+
+  const handleDisconnect = async (role: 'dispatch' | 'ecommerce' = 'dispatch') => {
+    if (role === 'dispatch') {
+      if (!confirm('Desconectar WhatsApp de Disparo?\n\nIsso limpa grupos, agendamentos e histórico para a próxima conexão.')) return;
+      await backend.disconnect('dispatch');
+      setStatus(ConnectionStatus.DISCONNECTED);
+      setChats([]);
+      setSchedules([]);
+      setQrCode(null);
+      setPairingCode(null);
+      setPairingPhone(null);
+      return;
+    }
+    if (!confirm('Desconectar WhatsApp de E-commerce?\n\nO CRM/inbox deixa de receber e enviar até reconectar.')) return;
+    await backend.disconnect('ecommerce');
+    setEcommerceStatus(ConnectionStatus.DISCONNECTED);
+    setEcommerceQr(null);
+    setEcommercePairingCode(null);
+    setEcommercePairingPhone(null);
   };
 
   const scheduleKey = (s: ScheduledMessage) => {
@@ -302,18 +347,10 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
     setSchedules(deduped);
   };
 
-  const handleDisconnect = async () => {
-    if (!confirm('Desconectar WhatsApp?\n\nIsso limpa grupos, agendamentos e histórico para a próxima conexão.')) return;
-    await backend.disconnect();
-    setStatus(ConnectionStatus.DISCONNECTED);
-    setChats([]);
-    setSchedules([]);
-    setQrCode(null);
-  };
-
   const noChatViews: View[] = ['library', 'settings', 'whatsapp', 'templates', 'calendar', 'followups', 'aiagents', 'flows', 'contacts', 'conversations', 'crm', 'campaigns', 'catalog', 'admin'];
   const skipChatLoad = noChatViews.includes(view);
   const isConnected = status === ConnectionStatus.CONNECTED;
+  const isEcommerceConnected = ecommerceStatus === ConnectionStatus.CONNECTED;
 
   const goToConnections = () => {
     if (!isSuperadmin) return;
@@ -373,11 +410,18 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
               <button
                 type="button"
                 onClick={goToConnections}
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors border shrink-0 text-xs font-semibold ${isConnected ? 'bs-badge-success normal-case' : 'bs-badge-warning normal-case'}`}
-                title="Ir para Conexão WhatsApp"
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors border shrink-0 text-xs font-semibold bs-badge-warning normal-case"
+                title="Ir para Conexões WhatsApp"
               >
-                <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-bs-accent' : 'bg-amber-500'}`} />
-                {isConnected ? 'WhatsApp conectado' : 'WhatsApp offline'}
+                <span className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-bs-accent' : 'bg-amber-500'}`} />
+                  Disparo {isConnected ? 'OK' : 'off'}
+                </span>
+                <span className="opacity-40">|</span>
+                <span className="flex items-center gap-1.5">
+                  <span className={`w-2 h-2 rounded-full ${isEcommerceConnected ? 'bg-bs-accent' : 'bg-amber-500'}`} />
+                  E-com {isEcommerceConnected ? 'OK' : 'off'}
+                </span>
               </button>
             )}
           </div>
@@ -426,11 +470,19 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
               tab={settingsTab}
               onTabChange={setSettingsTab}
               user={user}
-              status={status}
-              qrCode={qrCode}
-              pairingCode={pairingCode}
-              pairingPhone={pairingPhone}
-              onPairingCodeChange={(code) => {
+              dispatch={{
+                status,
+                qrCode,
+                pairingCode,
+                pairingPhone,
+              }}
+              ecommerce={{
+                status: ecommerceStatus,
+                qrCode: ecommerceQr,
+                pairingCode: ecommercePairingCode,
+                pairingPhone: ecommercePairingPhone,
+              }}
+              onDispatchPairingCodeChange={(code) => {
                 setPairingCode(code);
                 if (code) setStatus(ConnectionStatus.PAIRING_CODE_READY);
                 else if (status === ConnectionStatus.PAIRING_CODE_READY) {
@@ -438,9 +490,19 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
                   setPairingPhone(null);
                 }
               }}
-              onConnect={handleConnect}
-              onDisconnect={handleDisconnect}
-              onSync={async () => {
+              onEcommercePairingCodeChange={(code) => {
+                setEcommercePairingCode(code);
+                if (code) setEcommerceStatus(ConnectionStatus.PAIRING_CODE_READY);
+                else if (ecommerceStatus === ConnectionStatus.PAIRING_CODE_READY) {
+                  setEcommerceStatus(ConnectionStatus.DISCONNECTED);
+                  setEcommercePairingPhone(null);
+                }
+              }}
+              onDispatchConnect={() => handleConnect('dispatch')}
+              onDispatchDisconnect={() => handleDisconnect('dispatch')}
+              onEcommerceConnect={() => handleConnect('ecommerce')}
+              onEcommerceDisconnect={() => handleDisconnect('ecommerce')}
+              onDispatchSync={async () => {
                 setIsLoading(true);
                 await backend.refreshChats();
                 setChats([]);

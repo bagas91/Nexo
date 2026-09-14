@@ -58,24 +58,29 @@ class SessionBackup {
     }
 
     /** Maior mtime entre backups em backup/ (para throttle). */
-    _getLatestBackupMtime() {
-        const entries = this._listSessionBackups(this.backupDir);
+    _getLatestBackupMtime(prefix = 'session') {
+        const entries = this._listSessionBackups(this.backupDir)
+            .filter((e) => path.basename(e.path).startsWith(`${prefix}-`)
+                || (prefix === 'session' && path.basename(e.path).startsWith('session-')
+                    && !path.basename(e.path).startsWith('session-ecommerce-')));
         if (entries.length === 0) return null;
         return Math.max(...entries.map(e => e.mtimeMs));
     }
 
     /**
-     * @param {{ force?: boolean }} [options] - force=true ignora intervalo mínimo (restart, API, encerramento)
+     * @param {{ force?: boolean, sessionDir?: string }} [options] - force=true ignora intervalo mínimo (restart, API, encerramento)
      */
     async backup(options = {}) {
         const force = options.force === true;
+        const sessionDir = options.sessionDir || this.sessionDir;
+        const prefix = path.basename(sessionDir);
         try {
-            if (!fs.existsSync(this.sessionDir)) {
+            if (!fs.existsSync(sessionDir)) {
                 return { success: false, message: 'Sessão não encontrada' };
             }
 
             if (!force && this.backupMinIntervalMs > 0) {
-                const latest = this._getLatestBackupMtime();
+                const latest = this._getLatestBackupMtime(prefix);
                 if (latest != null && Date.now() - latest < this.backupMinIntervalMs) {
                     await this.cleanOldBackups();
                     return { success: true, skipped: true, message: 'Backup ignorado: cópia recente existe' };
@@ -83,10 +88,10 @@ class SessionBackup {
             }
 
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const backupPath = path.join(this.backupDir, `session-${timestamp}`);
+            const backupPath = path.join(this.backupDir, `${prefix}-${timestamp}`);
 
             // Copiar diretório completo
-            await this.copyDirectory(this.sessionDir, backupPath);
+            await this.copyDirectory(sessionDir, backupPath);
 
             await this.copyToArchive(backupPath);
 
@@ -104,14 +109,27 @@ class SessionBackup {
         }
     }
 
-    async restore(latest = true) {
+    /**
+     * @param {boolean|{ latest?: boolean, sessionDir?: string }} [options]
+     */
+    async restore(options = true) {
         try {
+            let latest = true;
+            let sessionDir = this.sessionDir;
+            if (typeof options === 'object' && options !== null) {
+                if ('latest' in options) latest = options.latest !== false;
+                if (options.sessionDir) sessionDir = options.sessionDir;
+            } else if (typeof options === 'boolean') {
+                latest = options;
+            }
+
             if (!fs.existsSync(this.backupDir)) {
                 return { success: false, message: 'Nenhum backup encontrado' };
             }
 
+            const prefix = path.basename(sessionDir);
             const backups = fs.readdirSync(this.backupDir)
-                .filter(f => f.startsWith('session-'))
+                .filter(f => f.startsWith(`${prefix}-`) || (prefix === 'session' && f.startsWith('session-') && !f.startsWith('session-ecommerce-')))
                 .map(f => ({
                     name: f,
                     path: path.join(this.backupDir, f),
@@ -126,12 +144,12 @@ class SessionBackup {
             const backupToRestore = latest ? backups[0] : backups[backups.length - 1];
 
             // Remover sessão atual se existir
-            if (fs.existsSync(this.sessionDir)) {
-                fs.rmSync(this.sessionDir, { recursive: true, force: true });
+            if (fs.existsSync(sessionDir)) {
+                fs.rmSync(sessionDir, { recursive: true, force: true });
             }
 
             // Restaurar backup
-            await this.copyDirectory(backupToRestore.path, this.sessionDir);
+            await this.copyDirectory(backupToRestore.path, sessionDir);
 
             return { success: true, backup: backupToRestore.name };
         } catch (err) {

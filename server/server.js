@@ -4,7 +4,17 @@ import cors from 'cors';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import whatsappClient from './services/whatsappClient.js';
+import {
+    dispatchClient,
+    ecommerceClient,
+    getWaFromRequest,
+    getAllWaStatuses,
+    initializeAllWhatsApp,
+    destroyAllWhatsAppGracefully,
+    WA_ROLES,
+} from './services/whatsappHub.js';
+/** Alias legado: disparos/agendamentos/grupos usam o WhatsApp de Disparo. */
+const whatsappClient = dispatchClient;
 import logger from './utils/logger.js';
 import sessionBackup from './utils/sessionBackup.js';
 import chatDB from './db/database.js';
@@ -340,8 +350,8 @@ app.post('/api/inbox/conversations/:chatId/test-agent', async (req, res) => {
         const chatId = decodeURIComponent(req.params.chatId);
         const conv = chatDB.getInboxConversation(chatId);
         if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' });
-        const status = whatsappClient.getStatus();
-        if (!status.ready) return res.status(409).json({ error: 'WhatsApp não conectado' });
+        const status = ecommerceClient.getStatus();
+        if (!status.ready) return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
         const { scheduleAgentReply } = await import('./services/attendanceService.js');
         scheduleAgentReply({
             chatId,
@@ -383,12 +393,12 @@ app.get('/api/inbox/avatars/:filename', async (req, res) => {
 
 app.post('/api/inbox/sync', async (req, res) => {
     try {
-        const status = whatsappClient.getStatus();
+        const status = ecommerceClient.getStatus();
         if (!status.ready) {
-            return res.status(409).json({ error: 'WhatsApp não conectado' });
+            return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
         }
         const { syncRecentInbox } = await import('./services/inboxService.js');
-        const result = await syncRecentInbox(whatsappClient.client);
+        const result = await syncRecentInbox(ecommerceClient.client);
         res.json({ success: true, ...result });
     } catch (err) {
         res.status(500).json({ error: err?.message || String(err) });
@@ -403,14 +413,14 @@ app.post('/api/inbox/reply', async (req, res) => {
         if (!digits || !message) {
             return res.status(400).json({ error: 'Informe phone e text' });
         }
-        const status = whatsappClient.getStatus();
+        const status = ecommerceClient.getStatus();
         if (!status.ready) {
-            return res.status(409).json({ error: 'WhatsApp não conectado' });
+            return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
         }
         if (chatId && String(chatId).includes('@')) {
-            await whatsappClient.sendChatMessage(chatId, message);
+            await ecommerceClient.sendChatMessage(chatId, message);
         } else {
-            await whatsappClient.sendPrivateMessage(digits, message);
+            await ecommerceClient.sendPrivateMessage(digits, message);
         }
         if (chatId) {
             chatDB.setInboxConversationMode(chatId, 'human');
@@ -424,7 +434,7 @@ app.post('/api/inbox/reply', async (req, res) => {
 
 userService.initSeedSuperadmin();
 
-const sendWhatsAppAlertMessage = (number, msg) => whatsappClient.sendPrivateMessage(number, msg);
+const sendWhatsAppAlertMessage = (number, msg) => ecommerceClient.sendPrivateMessage(number, msg);
 notifier.setWhatsAppAlertSender(sendWhatsAppAlertMessage);
 bulkSendReport.setWhatsAppReportSender(sendWhatsAppAlertMessage);
 
@@ -447,22 +457,31 @@ function emitBulkSendReport(results, meta, attachments) {
     const sessionExists = fs.existsSync(sessionDir);
     if (!sessionExists) {
         try {
-            const restore = await sessionBackup.restore();
+            const restore = await sessionBackup.restore({ sessionDir });
             if (restore.success) {
-                logger.info('Servidor: Sessão restaurada do backup antes da inicialização');
+                logger.info('Servidor: Sessão Disparo restaurada do backup antes da inicialização');
             }
         } catch (e) {
-            logger.warn('Servidor: Nenhum backup disponível ou erro ao restaurar', e?.message || e);
+            logger.warn('Servidor: Nenhum backup Disparo disponível ou erro ao restaurar', e?.message || e);
         }
+    }
+    const ecomDir = path.join(__dirname, '.wwebjs_auth', 'session-ecommerce');
+    if (!fs.existsSync(ecomDir)) {
+        try {
+            const restore = await sessionBackup.restore({ sessionDir: ecomDir });
+            if (restore.success) {
+                logger.info('Servidor: Sessão E-commerce restaurada do backup antes da inicialização');
+            }
+        } catch (_) { /* opcional na 1ª vez */ }
     }
     for (let attempt = 1; attempt <= STARTUP_INIT_MAX_ATTEMPTS; attempt++) {
         try {
-            await whatsappClient.initialize();
-            if (attempt > 1) logger.info(`WhatsApp: Inicialização ao subir servidor OK na tentativa ${attempt}/${STARTUP_INIT_MAX_ATTEMPTS}`);
+            await initializeAllWhatsApp();
+            if (attempt > 1) logger.info(`WhatsApp: Inicialização dual OK na tentativa ${attempt}/${STARTUP_INIT_MAX_ATTEMPTS}`);
             return;
         } catch (e) {
             logger.error(
-                `WhatsApp: Falha na inicialização ao subir servidor (tentativa ${attempt}/${STARTUP_INIT_MAX_ATTEMPTS})`,
+                `WhatsApp: Falha na inicialização dual ao subir servidor (tentativa ${attempt}/${STARTUP_INIT_MAX_ATTEMPTS})`,
                 e?.message || e
             );
             if (attempt < STARTUP_INIT_MAX_ATTEMPTS) {
@@ -474,8 +493,8 @@ function emitBulkSendReport(results, meta, attachments) {
 
 // Encerramento graceful: preserva sessão ao parar o processo (pm2 stop, Ctrl+C)
 const gracefulShutdown = async () => {
-    logger.info('Servidor: Encerramento graceful, preservando sessão WhatsApp...');
-    await whatsappClient.destroyGracefully();
+    logger.info('Servidor: Encerramento graceful, preservando sessões WhatsApp...');
+    await destroyAllWhatsAppGracefully();
     process.exit(0);
 };
 process.on('SIGTERM', () => { gracefulShutdown().catch(() => process.exit(1)); });
@@ -497,8 +516,23 @@ function getSendActivity() {
 }
 
 app.get('/api/status', async (req, res) => {
-    const status = whatsappClient.getStatus();
-    res.json({ ...status, ...getSendActivity() });
+    const roleClient = getWaFromRequest(req, WA_ROLES.DISPATCH);
+    const status = roleClient.getStatus();
+    const instances = getAllWaStatuses();
+    // Compat: campos top-level = Disparo (UI antiga). instances.* = as duas sessões.
+    const dispatch = instances.dispatch;
+    res.json({
+        ...dispatch,
+        ...getSendActivity(),
+        instances,
+        // quando ?role=ecommerce, também espelha esse papel no topo
+        ...(req.query?.role || req.query?.wa ? status : {}),
+        status: (req.query?.role || req.query?.wa) ? status.status : dispatch.status,
+        qr: (req.query?.role || req.query?.wa) ? status.qr : dispatch.qr,
+        pairingCode: (req.query?.role || req.query?.wa) ? status.pairingCode : dispatch.pairingCode,
+        pairingPhone: (req.query?.role || req.query?.wa) ? status.pairingPhone : dispatch.pairingPhone,
+        ready: (req.query?.role || req.query?.wa) ? status.ready : dispatch.ready,
+    });
 });
 
 app.get('/api/send-progress', (req, res) => {
@@ -571,9 +605,9 @@ app.post('/api/ai/chat', async (req, res) => {
 /** Envia relatório de exemplo para o número configurado (teste). */
 app.post('/api/notifications/test-report', async (req, res) => {
     try {
-        const status = whatsappClient.getStatus();
+        const status = dispatchClient.getStatus();
         if (!status.ready) {
-            return res.status(409).json({ error: 'WhatsApp não conectado' });
+            return res.status(409).json({ error: 'WhatsApp Disparo não conectado' });
         }
         const number = bulkSendReport.getReportWhatsAppNumber();
         if (!number) {
@@ -587,7 +621,8 @@ app.post('/api/notifications/test-report', async (req, res) => {
             finishedAt,
             attachmentNames: ['IMAGEM_JUNHO.jpeg', 'audio.ogg']
         });
-        await whatsappClient.sendPrivateMessage(number, text);
+        // Relatório de disparo sai pelo número de Disparo (mesmo canal operacional).
+        await dispatchClient.sendPrivateMessage(number, text);
         res.json({ success: true, to: number });
     } catch (err) {
         logger.error('API: Erro no teste de relatório', err.message);
@@ -654,18 +689,18 @@ app.post('/api/dispatch/resume', (req, res) => {
 
 app.get('/api/health', (req, res) => {
     try {
-        const status = whatsappClient.getStatus();
-        const whatsapp = status.ready
+        const instances = getAllWaStatuses();
+        const mapState = (status) => (status.ready
             ? 'connected'
-            : status.pairingCode
+            : status.pairingCode || status.qr
                 ? 'connecting'
-                : status.qr
-                    ? 'connecting'
-                    : 'disconnected';
+                : 'disconnected');
         const schedulesPending = chatDB.getSchedulesPendingCount();
         res.json({
             ok: true,
-            whatsapp,
+            whatsapp: mapState(instances.dispatch),
+            whatsappDispatch: mapState(instances.dispatch),
+            whatsappEcommerce: mapState(instances.ecommerce),
             schedulesPending,
             ...getSendActivity()
         });
@@ -675,11 +710,12 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/qr', async (req, res) => {
-    const status = whatsappClient.getStatus();
+    const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
+    const status = client.getStatus();
     if (status.qr) {
-        res.json({ qr: status.qr });
+        res.json({ qr: status.qr, role: client.role });
     } else {
-        res.status(404).json({ error: 'QR Code não disponível' });
+        res.status(404).json({ error: 'QR Code não disponível', role: client.role });
     }
 });
 
@@ -689,30 +725,33 @@ app.post('/api/pairing-code', async (req, res) => {
         if (!phoneNumber || !String(phoneNumber).trim()) {
             return res.status(400).json({ error: 'Informe o número do WhatsApp (DDI + DDD + número).' });
         }
+        const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
         const phone = String(phoneNumber).trim();
         let normalized;
         try {
-            normalized = whatsappClient.normalizePairingPhone(phone);
+            normalized = client.normalizePairingPhone(phone);
         } catch (err) {
             return res.status(400).json({ error: err?.message || String(err) });
         }
-        const current = whatsappClient.getStatus();
+        const current = client.getStatus();
 
         if (current.pairingCode && current.pairingPhone === normalized) {
             return res.json({
                 success: true,
+                role: client.role,
                 pairingCode: current.pairingCode,
                 pairingPhone: current.pairingPhone,
                 generating: false,
             });
         }
 
-        whatsappClient.startPairingCodeAsync(phone).catch((err) => {
-            logger.error('API: Erro ao gerar código de pareamento (async)', err?.message || err);
+        client.startPairingCodeAsync(phone).catch((err) => {
+            logger.error(`API: Erro ao gerar código de pareamento (${client.role})`, err?.message || err);
         });
 
         res.json({
             success: true,
+            role: client.role,
             generating: true,
             pairingPhone: normalized,
             message: 'Gerando código de pareamento…',
@@ -725,8 +764,9 @@ app.post('/api/pairing-code', async (req, res) => {
 
 app.post('/api/pairing-code/cancel', async (req, res) => {
     try {
-        await whatsappClient.cancelPairingCode();
-        res.json({ success: true });
+        const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
+        await client.cancelPairingCode();
+        res.json({ success: true, role: client.role });
     } catch (err) {
         res.status(500).json({ error: err?.message || String(err) });
     }
@@ -1544,9 +1584,18 @@ function clearAllOperationalData() {
 
 app.post('/api/disconnect', async (req, res) => {
     try {
-        clearAllOperationalData();
-        await whatsappClient.logout({ manual: true });
-        res.json({ success: true, message: 'Desconectado. Dados limpos para o próximo login.' });
+        const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
+        if (client.role === WA_ROLES.DISPATCH) {
+            clearAllOperationalData();
+        }
+        await client.logout({ manual: true });
+        res.json({
+            success: true,
+            role: client.role,
+            message: client.role === WA_ROLES.DISPATCH
+                ? 'Disparo desconectado. Dados de grupos/agendamentos limpos.'
+                : 'E-commerce desconectado.',
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1554,14 +1603,15 @@ app.post('/api/disconnect', async (req, res) => {
 
 app.post('/api/reconnect', async (req, res) => {
     try {
-        const backup = await sessionBackup.backup({ force: true });
+        const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
+        const backup = await sessionBackup.backup({ force: true, sessionDir: client.sessionDir });
         if (backup.success) {
-            logger.info('API: Backup criado antes da reconexão');
+            logger.info(`API: Backup criado antes da reconexão (${client.role})`);
         }
-        
-        await whatsappClient.logout(false); // false = tenta preservar sessão
-        setTimeout(() => whatsappClient.initialize(), 2000);
-        res.json({ success: true, message: 'Reconexão iniciada (sessão preservada)' });
+
+        await client.logout(false); // false = tenta preservar sessão
+        setTimeout(() => client.initialize(), 2000);
+        res.json({ success: true, role: client.role, message: 'Reconexão iniciada (sessão preservada)' });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -1570,9 +1620,10 @@ app.post('/api/reconnect', async (req, res) => {
 // Endpoint para fazer backup manual da sessão
 app.post('/api/session/backup', async (req, res) => {
     try {
-        const backup = await sessionBackup.backup({ force: true });
+        const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
+        const backup = await sessionBackup.backup({ force: true, sessionDir: client.sessionDir });
         if (backup.success) {
-            res.json({ success: true, message: 'Backup criado com sucesso' });
+            res.json({ success: true, role: client.role, message: 'Backup criado com sucesso' });
         } else {
             res.status(500).json({ error: backup.message });
         }
@@ -1584,15 +1635,16 @@ app.post('/api/session/backup', async (req, res) => {
 // Endpoint para restaurar backup (body opcional: { backup: "session-2026-03-06T21-02-17-657Z" } para backup específico)
 app.post('/api/session/restore', async (req, res) => {
     try {
+        const client = getWaFromRequest(req, WA_ROLES.DISPATCH);
         const backupName = req.body && req.body.backup;
         const restore = backupName
             ? await sessionBackup.restoreByName(backupName)
-            : await sessionBackup.restore();
+            : await sessionBackup.restore({ sessionDir: client.sessionDir });
         if (restore.success) {
             // Reinicializar após restaurar
-            await whatsappClient.logout(false);
-            setTimeout(() => whatsappClient.initialize(), 2000);
-            res.json({ success: true, message: 'Backup restaurado e reconectando...', backup: restore.backup });
+            await client.logout(false);
+            setTimeout(() => client.initialize(), 2000);
+            res.json({ success: true, role: client.role, message: 'Backup restaurado e reconectando...', backup: restore.backup });
         } else {
             res.status(500).json({ error: restore.message });
         }
@@ -2117,8 +2169,10 @@ app.listen(PORT, () => {
 
     const FOLLOWUP_WORKER_INTERVAL_MS = 30 * 1000;
     import('./services/followUpEngine.js').then(({ processDueFollowUpRuns }) => {
-        whatsappClient.setOnReadyCallback(() => {
+        dispatchClient.setOnReadyCallback(() => {
             runScheduleWorker().catch((err) => logger.error('Worker agendamentos (onReady)', err?.message || err));
+        });
+        ecommerceClient.setOnReadyCallback(() => {
             processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (onReady)', err?.message || err));
         });
         processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (inicial)', err?.message || err));

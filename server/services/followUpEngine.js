@@ -40,7 +40,7 @@ function shouldUseChatId(chatId, phone) {
 }
 
 async function sendFollowUpMessage(chatId, phone, text) {
-    const { default: whatsappClient } = await import('./whatsappClient.js');
+    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
     const message = String(text || '').trim();
     if (!message) return;
     if (shouldUseChatId(chatId, phone)) {
@@ -410,7 +410,7 @@ export async function processDueFollowUpRuns() {
     if (workerRunning) return;
     workerRunning = true;
     try {
-        const { default: whatsappClient } = await import('./whatsappClient.js');
+        const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
         if (!whatsappClient.getStatus().ready) return;
 
         await processIdleTriggers();

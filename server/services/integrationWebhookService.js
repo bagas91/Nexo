@@ -34,7 +34,7 @@ async function sendIntegrationWhatsApp(phone, text) {
     const message = String(text || '').trim();
     if (!digits || digits.length < 10 || !message) return { sent: false, reason: 'telefone ou mensagem inválidos' };
 
-    const { default: whatsappClient } = await import('./whatsappClient.js');
+    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
     if (!whatsappClient.getStatus().ready) {
         return { sent: false, reason: 'WhatsApp não conectado' };
     }

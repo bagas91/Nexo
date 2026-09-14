@@ -24,19 +24,36 @@ export type SettingsTab =
   | 'widget'
   | 'atendimento';
 
+interface WaPanelState {
+  status: ConnectionStatus;
+  qrCode: string | null;
+  pairingCode: string | null;
+  pairingPhone: string | null;
+}
+
 interface SettingsViewProps {
   tab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
   user: User;
-  status: ConnectionStatus;
-  qrCode: string | null;
+  /** @deprecated use dispatch* — mantido para compat */
+  status?: ConnectionStatus;
+  qrCode?: string | null;
   pairingCode?: string | null;
   pairingPhone?: string | null;
   onPairingCodeChange?: (code: string | null) => void;
-  onConnect: () => void;
-  onDisconnect: () => void;
-  onSync: () => Promise<void>;
-  syncing: boolean;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
+  onSync?: () => Promise<void>;
+  syncing?: boolean;
+  dispatch?: WaPanelState;
+  ecommerce?: WaPanelState;
+  onDispatchConnect?: () => void;
+  onDispatchDisconnect?: () => void;
+  onDispatchSync?: () => Promise<void>;
+  onDispatchPairingCodeChange?: (code: string | null) => void;
+  onEcommerceConnect?: () => void;
+  onEcommerceDisconnect?: () => void;
+  onEcommercePairingCodeChange?: (code: string | null) => void;
 }
 
 const TABS: { id: SettingsTab; label: string }[] = [
@@ -69,6 +86,15 @@ const SettingsView: React.FC<SettingsViewProps> = ({
   onDisconnect,
   onSync,
   syncing,
+  dispatch,
+  ecommerce,
+  onDispatchConnect,
+  onDispatchDisconnect,
+  onDispatchSync,
+  onDispatchPairingCodeChange,
+  onEcommerceConnect,
+  onEcommerceDisconnect,
+  onEcommercePairingCodeChange,
 }) => {
   const visibleTabs = useMemo(() => TABS.filter((t) => canTab(user, t.id)), [user]);
   const detailLabel = tab === 'bling' ? 'Bling ERP' : tab === 'woocommerce' ? 'WooCommerce' : null;
@@ -76,6 +102,19 @@ const SettingsView: React.FC<SettingsViewProps> = ({
     || detailLabel
     || 'Configurações';
   const selectValue = (tab === 'bling' || tab === 'woocommerce') ? 'integrations' : tab;
+
+  const dispatchState: WaPanelState = dispatch || {
+    status: status || ConnectionStatus.DISCONNECTED,
+    qrCode: qrCode ?? null,
+    pairingCode: pairingCode ?? null,
+    pairingPhone: pairingPhone ?? null,
+  };
+  const ecommerceState: WaPanelState = ecommerce || {
+    status: ConnectionStatus.DISCONNECTED,
+    qrCode: null,
+    pairingCode: null,
+    pairingPhone: null,
+  };
 
   if (!canTab(user, (tab === 'bling' || tab === 'woocommerce') ? 'integrations' : tab)
     && tab !== 'bling'
@@ -108,18 +147,48 @@ const SettingsView: React.FC<SettingsViewProps> = ({
 
       <div className="min-w-0">
         {tab === 'connections' && canTab(user, 'connections') && (
-          <WhatsAppConnection
-            status={status}
-            qrCode={qrCode}
-            pairingCode={pairingCode ?? null}
-            pairingPhone={pairingPhone ?? null}
-            onPairingCodeChange={onPairingCodeChange}
-            onConnect={onConnect}
-            onDisconnect={onDisconnect}
-            onSync={onSync}
-            syncing={syncing}
-            embedded
-          />
+          <div className="space-y-8">
+            <div>
+              <h2 className="bs-page-title">Conexões</h2>
+              <p className="bs-page-desc mt-1">
+                Dois WhatsApps separados: um só para a Palavra do Dia / disparos, outro só para o e-commerce.
+              </p>
+            </div>
+            <div className="grid gap-6 lg:grid-cols-2">
+              <WhatsAppConnection
+                role="dispatch"
+                title="Disparo — Palavra do Dia"
+                subtitle="Agendamentos, grupos e envios em massa"
+                status={dispatchState.status}
+                qrCode={dispatchState.qrCode}
+                pairingCode={dispatchState.pairingCode}
+                pairingPhone={dispatchState.pairingPhone}
+                onPairingCodeChange={onDispatchPairingCodeChange || onPairingCodeChange}
+                onConnect={onDispatchConnect || onConnect || (() => {})}
+                onDisconnect={onDispatchDisconnect || onDisconnect || (() => {})}
+                onSync={onDispatchSync || onSync}
+                syncing={syncing}
+                showSyncGroups
+                embedded
+                hidePageHeader
+              />
+              <WhatsAppConnection
+                role="ecommerce"
+                title="E-commerce — CRM"
+                subtitle="Inbox, atendimento IA, pedidos e follow-ups"
+                status={ecommerceState.status}
+                qrCode={ecommerceState.qrCode}
+                pairingCode={ecommerceState.pairingCode}
+                pairingPhone={ecommerceState.pairingPhone}
+                onPairingCodeChange={onEcommercePairingCodeChange}
+                onConnect={onEcommerceConnect || (() => {})}
+                onDisconnect={onEcommerceDisconnect || (() => {})}
+                showSyncGroups={false}
+                embedded
+                hidePageHeader
+              />
+            </div>
+          </div>
         )}
         {tab === 'integrations' && canTab(user, 'integrations') && (
           <IntegrationsSettingsView onTabChange={onTabChange} />

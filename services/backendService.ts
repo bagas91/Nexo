@@ -96,7 +96,7 @@ export class BackendService {
     BackendService.saveUser(null);
   }
 
-  async getStatus(): Promise<{
+  async getStatus(role?: 'dispatch' | 'ecommerce'): Promise<{
     status: ConnectionStatus;
     qr?: string;
     pairingCode?: string;
@@ -104,9 +104,32 @@ export class BackendService {
     sendInProgress?: boolean;
     chatsSyncInProgress?: boolean;
     dispatchPaused?: boolean;
+    instances?: {
+      dispatch?: {
+        status: ConnectionStatus;
+        qr?: string;
+        pairingCode?: string;
+        pairingPhone?: string;
+        ready?: boolean;
+        label?: string;
+        shortLabel?: string;
+        description?: string;
+      };
+      ecommerce?: {
+        status: ConnectionStatus;
+        qr?: string;
+        pairingCode?: string;
+        pairingPhone?: string;
+        ready?: boolean;
+        label?: string;
+        shortLabel?: string;
+        description?: string;
+      };
+    };
   }> {
     try {
-      const res = await fetch(`${API_BASE}/status`, { headers: this.headers() });
+      const q = role ? `?role=${encodeURIComponent(role)}` : '';
+      const res = await fetch(`${API_BASE}/status${q}`, { headers: this.headers() });
       const data = await res.json();
       const sendInProgress = !!(data.sendInProgress || data.scheduleWorkerRunning || (data.sendInProgressCount > 0));
       this.sendInProgress = sendInProgress;
@@ -118,6 +141,7 @@ export class BackendService {
         sendInProgress,
         chatsSyncInProgress: !!data.chatsSyncInProgress,
         dispatchPaused: !!data.dispatchPaused,
+        instances: data.instances,
       };
     } catch (err) {
       return { status: ConnectionStatus.DISCONNECTED, sendInProgress: false, dispatchPaused: false };
@@ -182,14 +206,14 @@ export class BackendService {
     };
   }
 
-  async connect() {
+  async connect(role: 'dispatch' | 'ecommerce' = 'dispatch') {
     try {
-      const res = await fetch(`${API_BASE}/qr`, { headers: this.headers() });
+      const res = await fetch(`${API_BASE}/qr?role=${encodeURIComponent(role)}`, { headers: this.headers() });
       if (res.ok) {
         const data = await res.json();
         if (data.qr) {
-          this.status = ConnectionStatus.QR_READY;
-          return data.qr;
+          if (role === 'dispatch') this.status = ConnectionStatus.QR_READY;
+          return data.qr as string;
         }
       }
       return null;
@@ -199,17 +223,20 @@ export class BackendService {
     }
   }
 
-  async startPairingCode(phoneNumber: string): Promise<{ pairingCode?: string; pairingPhone?: string; generating: boolean }> {
-    const res = await fetch(`${API_BASE}/pairing-code`, {
+  async startPairingCode(
+    phoneNumber: string,
+    role: 'dispatch' | 'ecommerce' = 'dispatch'
+  ): Promise<{ pairingCode?: string; pairingPhone?: string; generating: boolean }> {
+    const res = await fetch(`${API_BASE}/pairing-code?role=${encodeURIComponent(role)}`, {
       method: 'POST',
       headers: this.headers(true),
-      body: JSON.stringify({ phoneNumber }),
+      body: JSON.stringify({ phoneNumber, role }),
     });
     const data = await res.json();
     if (!res.ok) {
       throw new Error(data.error || 'Não foi possível iniciar o pareamento.');
     }
-    if (data.pairingCode) {
+    if (data.pairingCode && role === 'dispatch') {
       this.status = ConnectionStatus.PAIRING_CODE_READY;
     }
     return {
@@ -222,32 +249,34 @@ export class BackendService {
   async pollPairingCode(
     targetPhone: string,
     maxAttempts = 28,
-    intervalMs = 2000
+    intervalMs = 2000,
+    role: 'dispatch' | 'ecommerce' = 'dispatch'
   ): Promise<{ pairingCode: string; pairingPhone?: string }> {
     const normalized = targetPhone.replace(/\D/g, '');
     for (let i = 0; i < maxAttempts; i++) {
       await new Promise((r) => setTimeout(r, intervalMs));
-      const res = await fetch(`${API_BASE}/status`, { headers: this.headers() });
+      const res = await fetch(`${API_BASE}/status?role=${encodeURIComponent(role)}`, { headers: this.headers() });
       const data = await res.json();
       if (data.pairingError) {
         throw new Error(String(data.pairingError));
       }
       if (data.pairingCode && String(data.pairingPhone || '').replace(/\D/g, '') === normalized) {
-        this.status = ConnectionStatus.PAIRING_CODE_READY;
+        if (role === 'dispatch') this.status = ConnectionStatus.PAIRING_CODE_READY;
         return { pairingCode: data.pairingCode, pairingPhone: data.pairingPhone };
       }
       if (data.status === ConnectionStatus.CONNECTED) {
-        this.status = ConnectionStatus.CONNECTED;
+        if (role === 'dispatch') this.status = ConnectionStatus.CONNECTED;
         throw new Error('WhatsApp conectou antes de exibir o código.');
       }
     }
     throw new Error('WhatsApp não gerou o código. Use a aba QR Code — escaneie com seu celular.');
   }
 
-  async cancelPairingCode(): Promise<void> {
-    await fetch(`${API_BASE}/pairing-code/cancel`, {
+  async cancelPairingCode(role: 'dispatch' | 'ecommerce' = 'dispatch'): Promise<void> {
+    await fetch(`${API_BASE}/pairing-code/cancel?role=${encodeURIComponent(role)}`, {
       method: 'POST',
       headers: this.headers(true),
+      body: JSON.stringify({ role }),
     });
   }
 
@@ -443,17 +472,26 @@ export class BackendService {
     }
   }
 
-  async disconnect(): Promise<void> {
+  async disconnect(role: 'dispatch' | 'ecommerce' = 'dispatch'): Promise<void> {
     try {
-      await fetch(`${API_BASE}/disconnect`, { method: 'POST', headers: this.headers() });
+      await fetch(`${API_BASE}/disconnect?role=${encodeURIComponent(role)}`, {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify({ role }),
+      });
+      if (role === 'dispatch') this.status = ConnectionStatus.DISCONNECTED;
     } catch (err) {
       console.error('Erro ao desconectar WhatsApp:', err);
     }
   }
 
-  async reconnect(): Promise<void> {
+  async reconnect(role: 'dispatch' | 'ecommerce' = 'dispatch'): Promise<void> {
     try {
-      await fetch(`${API_BASE}/reconnect`, { method: 'POST', headers: this.headers() });
+      await fetch(`${API_BASE}/reconnect?role=${encodeURIComponent(role)}`, {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify({ role }),
+      });
     } catch (err) {
       console.error('Erro ao reconectar WhatsApp:', err);
     }

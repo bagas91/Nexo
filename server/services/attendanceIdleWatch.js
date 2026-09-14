@@ -56,7 +56,7 @@ export async function processIdleHumanAlerts() {
                 && conv.waitMinutes <= maxWaitForCustomerMsg
             ) {
                 try {
-                    const { default: whatsappClient } = await import('./whatsappClient.js');
+                    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
                     if (whatsappClient.getStatus?.().ready) {
                         await whatsappClient.sendChatMessage(conv.chatId, customerMsg);
                     }

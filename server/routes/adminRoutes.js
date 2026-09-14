@@ -12,7 +12,7 @@ import userService from '../utils/userService.js';
 import { clientIp, logAudit } from '../utils/auditService.js';
 import { APP_MODULES } from '../config/modules.js';
 import { getCatalogDashboard } from '../services/catalogQualityService.js';
-import whatsappClient from '../services/whatsappClient.js';
+import { dispatchClient as whatsappClient, ecommerceClient, getAllWaStatuses } from '../services/whatsappHub.js';
 import { ensureValidBlingToken } from '../services/blingService.js';
 import { maskBlingConfigForClient } from '../utils/blingConfig.js';
 import logger from '../utils/logger.js';
@@ -58,9 +58,14 @@ router.get('/audit', (req, res) => {
 router.get('/health', async (_req, res) => {
     try {
         const wa = whatsappClient.getStatus?.() || {};
+        const ecom = ecommerceClient.getStatus?.() || {};
         let whatsapp = 'disconnected';
         if (wa.ready) whatsapp = 'connected';
         else if (wa.status === 'QR_READY' || wa.status === 'PAIRING_CODE_READY' || wa.qr) whatsapp = 'connecting';
+        let whatsappEcommerce = 'disconnected';
+        if (ecom.ready) whatsappEcommerce = 'connected';
+        else if (ecom.status === 'QR_READY' || ecom.status === 'PAIRING_CODE_READY' || ecom.qr) whatsappEcommerce = 'connecting';
+        const instances = getAllWaStatuses();
 
         const blingRaw = chatDB.getPlatformKv('bling') || {};
         const blingMasked = maskBlingConfigForClient(blingRaw);
@@ -97,7 +102,17 @@ router.get('/health', async (_req, res) => {
                 status: whatsapp,
                 raw: wa.status || null,
                 ready: !!wa.ready,
+                role: 'dispatch',
+                label: wa.label || 'Disparo',
             },
+            whatsappEcommerce: {
+                status: whatsappEcommerce,
+                raw: ecom.status || null,
+                ready: !!ecom.ready,
+                role: 'ecommerce',
+                label: ecom.label || 'E-commerce',
+            },
+            whatsappInstances: instances,
             bling: {
                 status: blingStatus,
                 detail: blingDetail,

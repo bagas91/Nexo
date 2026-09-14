@@ -24,8 +24,35 @@ const ACTIVITY_HEARTBEAT_MS = 10 * 60 * 1000;
 const QR_MIN_DISPLAY_MS = 25 * 1000; // mesmo QR por 25s para dar tempo de escanear
 
 const __dirnameServices = path.dirname(fileURLToPath(import.meta.url));
-/** Mesmo caminho que LocalAuth (sessão única do Puppeteer). */
-const WWWEBJS_SESSION_DIR = path.join(__dirnameServices, '..', '.wwebjs_auth', 'session');
+const WWEBJS_AUTH_ROOT = path.join(__dirnameServices, '..', '.wwebjs_auth');
+
+/** Papéis oficiais das duas sessões WhatsApp. */
+export const WA_ROLES = Object.freeze({
+    DISPATCH: 'dispatch',
+    ECOMMERCE: 'ecommerce',
+});
+
+export const WA_ROLE_META = Object.freeze({
+    [WA_ROLES.DISPATCH]: {
+        label: 'Disparo — Palavra do Dia',
+        shortLabel: 'Disparo',
+        description: 'Agendamentos, grupos e disparos em massa',
+    },
+    [WA_ROLES.ECOMMERCE]: {
+        label: 'E-commerce — CRM',
+        shortLabel: 'E-commerce',
+        description: 'Atendimento, inbox, pedidos e follow-ups',
+    },
+});
+
+/**
+ * LocalAuth: sem clientId → pasta `session` (compatível com a sessão atual).
+ * Com clientId → pasta `session-${clientId}`.
+ */
+export function resolveSessionDir(clientId) {
+    const sessionDirName = clientId ? `session-${clientId}` : 'session';
+    return path.join(WWEBJS_AUTH_ROOT, sessionDirName);
+}
 
 const DELAY_BETWEEN_ATTACHMENTS_MS = 2500;
 const GET_CHATS_TIMEOUT_MS = Number(process.env.GET_CHATS_TIMEOUT_MS) || 120000;
@@ -125,13 +152,46 @@ function isMediaUploadRetryable(errMsg) {
     return MEDIA_UPLOAD_RETRYABLE.test(errMsg);
 }
 
-class WhatsAppClient {
-    constructor() {
+export class WhatsAppClient {
+    /**
+     * @param {{
+     *   role?: string,
+     *   clientId?: string|null,
+     *   enableInbox?: boolean,
+     *   clearChatsOnQr?: boolean,
+     *   enableGroupSync?: boolean,
+     * }} [opts]
+     */
+    constructor(opts = {}) {
+        const role = opts.role === WA_ROLES.ECOMMERCE ? WA_ROLES.ECOMMERCE : WA_ROLES.DISPATCH;
+        const meta = WA_ROLE_META[role] || WA_ROLE_META[WA_ROLES.DISPATCH];
+        this.role = role;
+        this.label = meta.label;
+        this.shortLabel = meta.shortLabel;
+        this.description = meta.description;
+        /** null = pasta legada `.wwebjs_auth/session` (Disparo). */
+        this.authClientId = opts.clientId === undefined
+            ? (role === WA_ROLES.ECOMMERCE ? 'ecommerce' : null)
+            : opts.clientId;
+        this.sessionDir = resolveSessionDir(this.authClientId);
+        this.enableInbox = opts.enableInbox != null
+            ? !!opts.enableInbox
+            : role === WA_ROLES.ECOMMERCE;
+        this.clearChatsOnQr = opts.clearChatsOnQr != null
+            ? !!opts.clearChatsOnQr
+            : role === WA_ROLES.DISPATCH;
+        this.enableGroupSync = opts.enableGroupSync != null
+            ? !!opts.enableGroupSync
+            : role === WA_ROLES.DISPATCH;
+        this.logTag = `WhatsApp[${this.shortLabel}]`;
+
         this.client = null;
         this.qrCode = null;
         this.isReady = false;
         this.backupInterval = null;
         this.activityHeartbeatInterval = null;
+        this.inboxSyncInterval = null;
+        this.inboxHeavySyncInterval = null;
         this.lastQrUpdate = 0; // throttle: evita trocar QR o tempo todo
         this.isReconnecting = false;
         this.isRestarting = false;
@@ -158,6 +218,22 @@ class WhatsAppClient {
         this._lastReadyHandledAt = 0;
     }
 
+    _logInfo(...args) {
+        logger.info(this.logTag + ':', ...args);
+    }
+
+    _logWarn(...args) {
+        logger.warn(this.logTag + ':', ...args);
+    }
+
+    _logError(...args) {
+        logger.error(this.logTag + ':', ...args);
+    }
+
+    _logDebug(...args) {
+        logger.debug?.(this.logTag + ':', ...args);
+    }
+
     isChatsSyncInProgress() {
         return this._chatsSyncInProgress;
     }
@@ -170,19 +246,16 @@ class WhatsAppClient {
     }
 
     _killChromiumForSessionProfile() {
-        const needle = WWWEBJS_SESSION_DIR;
+        const needle = this.sessionDir;
         try {
             execSync(`pkill -f "${needle.replace(/"/g, '\\"')}" 2>/dev/null || true`, { timeout: 12000 });
         } catch (_) { /* exit 1 se não houver match */ }
-        try {
-            execSync('pkill -f ".wwebjs_auth/session" 2>/dev/null || true', { timeout: 8000 });
-        } catch (_) {}
     }
 
     _removeChromiumSingletonArtifacts() {
         const names = ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile'];
         for (const n of names) {
-            const p = path.join(WWWEBJS_SESSION_DIR, n);
+            const p = path.join(this.sessionDir, n);
             try {
                 fs.rmSync(p, { force: true, maxRetries: 5, retryDelay: 200 });
             } catch (_) { /* arquivo pode estar bloqueado */ }
@@ -222,6 +295,14 @@ class WhatsAppClient {
         if (this.activityHeartbeatInterval) {
             clearInterval(this.activityHeartbeatInterval);
             this.activityHeartbeatInterval = null;
+        }
+        if (this.inboxSyncInterval) {
+            clearInterval(this.inboxSyncInterval);
+            this.inboxSyncInterval = null;
+        }
+        if (this.inboxHeavySyncInterval) {
+            clearInterval(this.inboxHeavySyncInterval);
+            this.inboxHeavySyncInterval = null;
         }
     }
 
@@ -275,7 +356,7 @@ class WhatsAppClient {
                 this.isReady = false;
                 this.qrCode = null;
                 this._clearPeriodicIntervals();
-                const restore = await sessionBackup.restore();
+                const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
                 if (restore.success) logger.info('WhatsApp: Backup restaurado, reinicializando...');
                 await this.initialize();
             } catch (e) {
@@ -315,8 +396,11 @@ class WhatsAppClient {
         const clientEpoch = ++this._clientEpoch;
         const pairingPhone = this._pairingInitPhone;
         const chromePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+        const authStrategy = this.authClientId
+            ? new LocalAuth({ clientId: this.authClientId })
+            : new LocalAuth();
         const clientOptions = {
-            authStrategy: new LocalAuth(),
+            authStrategy,
             puppeteer: {
                 headless: true,
                 ...(chromePath ? { executablePath: chromePath } : {}),
@@ -335,7 +419,7 @@ class WhatsAppClient {
                 showNotification: true,
                 intervalMs: 180000,
             };
-            logger.info(`WhatsApp: Cliente em modo pareamento por código (${pairingPhone.slice(0, 4)}…)`);
+            this._logInfo(`Cliente em modo pareamento por código (${pairingPhone.slice(0, 4)}…)`);
         }
         this.client = new Client(clientOptions);
 
@@ -362,10 +446,14 @@ class WhatsAppClient {
             }
             this.lastQrUpdate = now;
             this.markActivity('qr');
-            logger.info('WhatsApp: QR Code recebido - Limpando cache de grupos antigo');
-            chatDB.clearChats();
+            if (this.clearChatsOnQr) {
+                this._logInfo('QR Code recebido — limpando cache de grupos');
+                chatDB.clearChats();
+            } else {
+                this._logInfo('QR Code recebido');
+            }
             this.qrCode = await QRCode.toDataURL(qr);
-            logger.info('WhatsApp: QR Code convertido para imagem');
+            this._logInfo('QR Code convertido para imagem');
         });
 
         this.client.on('ready', async () => {
@@ -394,22 +482,22 @@ class WhatsAppClient {
 
             // Backup ao ficar pronto (intervalo mínimo entre cópias evita rajada em reconnect)
             try {
-                const backup = await sessionBackup.backup();
+                const backup = await sessionBackup.backup({ sessionDir: this.sessionDir });
                 if (backup.success && !backup.skipped) {
-                    logger.info('WhatsApp: Backup da sessão criado automaticamente');
+                    this._logInfo('Backup da sessão criado automaticamente');
                 }
             } catch (err) {
-                logger.warn('WhatsApp: Erro ao criar backup automático', err.message);
+                this._logWarn('Erro ao criar backup automático', err.message);
             }
 
             // Backup periódico a cada 6h para sempre ter um backup recente
             this.backupInterval = setInterval(async () => {
                 if (!this.isReady || !this.client) return;
                 try {
-                    const backup = await sessionBackup.backup();
-                    if (backup.success && !backup.skipped) logger.info('WhatsApp: Backup periódico da sessão criado');
+                    const backup = await sessionBackup.backup({ sessionDir: this.sessionDir });
+                    if (backup.success && !backup.skipped) this._logInfo('Backup periódico da sessão criado');
                 } catch (err) {
-                    logger.warn('WhatsApp: Erro no backup periódico', err.message);
+                    this._logWarn('Erro no backup periódico', err.message);
                 }
             }, BACKUP_INTERVAL_MS);
 
@@ -426,55 +514,57 @@ class WhatsAppClient {
                 }
             }
 
-            setTimeout(() => {
-                if (this.isReady && this.client) {
-                    syncRecentInbox(this.client, {
-                        chatLimit: 25,
-                        messageLimit: 15,
-                        skipMedia: true,
-                        skipAvatars: true,
-                        triggerAgentForRecentMs: 15 * 60 * 1000,
-                    }).catch((err) => {
-                        logger.warn('Inbox: sync inicial falhou', err?.message || err);
-                    });
-                }
-            }, 12000);
+            if (this.enableInbox) {
+                setTimeout(() => {
+                    if (this.isReady && this.client) {
+                        syncRecentInbox(this.client, {
+                            chatLimit: 25,
+                            messageLimit: 15,
+                            skipMedia: true,
+                            skipAvatars: true,
+                            triggerAgentForRecentMs: 15 * 60 * 1000,
+                        }).catch((err) => {
+                            this._logWarn('Inbox: sync inicial falhou', err?.message || err);
+                        });
+                    }
+                }, 12000);
 
-            // Poll leve: eventos message_* às vezes param após carga do Chrome; sync aciona o agente
-            if (this.inboxSyncInterval) clearInterval(this.inboxSyncInterval);
-            this.inboxSyncInterval = setInterval(() => {
-                if (this.isReady && this.client) {
-                    syncRecentInbox(this.client, {
-                        chatLimit: 12,
-                        messageLimit: 6,
-                        skipMedia: true,
-                        skipAvatars: true,
-                        triggerAgentForRecentMs: 10 * 60 * 1000,
-                    }).catch((err) => {
-                        logger.warn('Inbox: sync periódico (leve) falhou', err?.message || err);
-                    });
-                }
-            }, 30 * 1000);
+                // Poll leve: eventos message_* às vezes param após carga do Chrome; sync aciona o agente
+                if (this.inboxSyncInterval) clearInterval(this.inboxSyncInterval);
+                this.inboxSyncInterval = setInterval(() => {
+                    if (this.isReady && this.client) {
+                        syncRecentInbox(this.client, {
+                            chatLimit: 12,
+                            messageLimit: 6,
+                            skipMedia: true,
+                            skipAvatars: true,
+                            triggerAgentForRecentMs: 10 * 60 * 1000,
+                        }).catch((err) => {
+                            this._logWarn('Inbox: sync periódico (leve) falhou', err?.message || err);
+                        });
+                    }
+                }, 30 * 1000);
 
-            // Sync completo (mídia/avatar) bem mais espaçado — não compete com o atendimento
-            if (this.inboxHeavySyncInterval) clearInterval(this.inboxHeavySyncInterval);
-            this.inboxHeavySyncInterval = setInterval(() => {
-                if (this.isReady && this.client) {
-                    syncRecentInbox(this.client, {
-                        chatLimit: 30,
-                        messageLimit: 20,
-                        skipMedia: false,
-                        skipAvatars: false,
-                        triggerAgentForRecentMs: 0,
-                    }).catch((err) => {
-                        logger.warn('Inbox: sync pesado falhou', err?.message || err);
-                    });
-                }
-            }, 15 * 60 * 1000);
+                // Sync completo (mídia/avatar) bem mais espaçado — não compete com o atendimento
+                if (this.inboxHeavySyncInterval) clearInterval(this.inboxHeavySyncInterval);
+                this.inboxHeavySyncInterval = setInterval(() => {
+                    if (this.isReady && this.client) {
+                        syncRecentInbox(this.client, {
+                            chatLimit: 30,
+                            messageLimit: 20,
+                            skipMedia: false,
+                            skipAvatars: false,
+                            triggerAgentForRecentMs: 0,
+                        }).catch((err) => {
+                            this._logWarn('Inbox: sync pesado falhou', err?.message || err);
+                        });
+                    }
+                }, 15 * 60 * 1000);
+            }
 
             notifier.notifyOnce(
-                'whatsapp-back-online',
-                'WhatsApp conectado. O worker pode processar agendamentos vencidos (até ~1 min) e o envio em massa volta a funcionar.',
+                `whatsapp-back-online-${this.role}`,
+                `${this.label} conectado.`,
                 'info',
                 2 * 60 * 1000
             );
@@ -538,7 +628,7 @@ class WhatsAppClient {
 
             // Backup após desconexão (throttle no sessionBackup evita uma cópia por flap seguido de ready)
             try {
-                const backup = await sessionBackup.backup();
+                const backup = await sessionBackup.backup({ sessionDir: this.sessionDir });
                 if (backup.success && !backup.skipped) logger.info('WhatsApp: Backup da sessão feito após desconexão');
             } catch (_) { /* sessão pode já estar indisponível */ }
 
@@ -546,7 +636,7 @@ class WhatsAppClient {
                 logger.info('WhatsApp: Tentando reconectar automaticamente em 5 segundos...');
                 setTimeout(async () => {
                     try {
-                        const restore = await sessionBackup.restore();
+                        const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
                         if (restore.success) logger.info('WhatsApp: Backup restaurado, tentando reconectar...');
                         await this.initialize().catch((e) => logger.error('WhatsApp: Erro na reconexão automática', e.message));
                     } catch (err) {
@@ -571,24 +661,26 @@ class WhatsAppClient {
             }
         });
 
-        this.client.on('message_create', async (msg) => {
-            if (clientEpoch !== this._clientEpoch || !this.isReady) return;
-            try {
-                await persistInboxMessage(msg);
-            } catch (err) {
-                logger.warn('Inbox: erro ao registrar mensagem', err?.message || err);
-            }
-        });
+        if (this.enableInbox) {
+            this.client.on('message_create', async (msg) => {
+                if (clientEpoch !== this._clientEpoch || !this.isReady) return;
+                try {
+                    await persistInboxMessage(msg);
+                } catch (err) {
+                    this._logWarn('Inbox: erro ao registrar mensagem', err?.message || err);
+                }
+            });
 
-        // Backup: em algumas sessões o message_create falha/atrasa; `message` cobre só entrantes
-        this.client.on('message', async (msg) => {
-            if (clientEpoch !== this._clientEpoch || !this.isReady) return;
-            try {
-                await persistInboxMessage(msg);
-            } catch (err) {
-                logger.warn('Inbox: erro ao registrar mensagem (event message)', err?.message || err);
-            }
-        });
+            // Backup: em algumas sessões o message_create falha/atrasa; `message` cobre só entrantes
+            this.client.on('message', async (msg) => {
+                if (clientEpoch !== this._clientEpoch || !this.isReady) return;
+                try {
+                    await persistInboxMessage(msg);
+                } catch (err) {
+                    this._logWarn('Inbox: erro ao registrar mensagem (event message)', err?.message || err);
+                }
+            });
+        }
 
         const doInitialize = async () => {
             await Promise.race([
@@ -609,7 +701,7 @@ class WhatsAppClient {
             if (isContextDestroyed && !isRetry) {
                 logger.warn('WhatsApp: Contexto destruído. Fechando cliente e reiniciando em 15s (1 tentativa)...');
                 try {
-                    await sessionBackup.backup({ force: true });
+                    await sessionBackup.backup({ force: true, sessionDir: this.sessionDir });
                 } catch (_) { /* pode falhar se sessão já corrompida */ }
                 if (this.client) {
                     try {
@@ -624,7 +716,7 @@ class WhatsAppClient {
             if (err.message.includes('ERR_CONNECTION') || err.message.includes('Timeout')) {
                 logger.warn('WhatsApp: Erro de conexão detectado, tentando restaurar backup...');
                 try {
-                    const restore = await sessionBackup.restore();
+                    const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
                     if (restore.success) {
                         logger.info('WhatsApp: Backup restaurado, tentando reconectar...');
                         setTimeout(() => {
@@ -894,11 +986,18 @@ class WhatsAppClient {
     }
 
     getStatus() {
+        const base = {
+            role: this.role,
+            label: this.label,
+            shortLabel: this.shortLabel,
+            description: this.description,
+        };
         if (this.isReady) {
-            return { status: 'CONNECTED', ready: true, authenticated: true };
+            return { ...base, status: 'CONNECTED', ready: true, authenticated: true };
         }
         if (this.pairingCode) {
             return {
+                ...base,
                 status: 'PAIRING_CODE_READY',
                 ready: false,
                 authenticated: false,
@@ -908,6 +1007,7 @@ class WhatsAppClient {
         }
         if (this._pairingTask && this.pairingPhone) {
             return {
+                ...base,
                 status: 'CONNECTING',
                 ready: false,
                 authenticated: false,
@@ -917,6 +1017,7 @@ class WhatsAppClient {
         }
         if (this._pairingLastError) {
             return {
+                ...base,
                 status: 'QR_READY',
                 ready: false,
                 authenticated: false,
@@ -926,9 +1027,9 @@ class WhatsAppClient {
             };
         }
         if (this.qrCode) {
-            return { status: 'QR_READY', ready: false, authenticated: false, qr: this.qrCode };
+            return { ...base, status: 'QR_READY', ready: false, authenticated: false, qr: this.qrCode };
         }
-        return { status: 'CONNECTING', ready: false, authenticated: false };
+        return { ...base, status: 'CONNECTING', ready: false, authenticated: false };
     }
 
     _serializedId(obj) {
@@ -1558,13 +1659,13 @@ class WhatsAppClient {
 
     _clearWhatsAppSessionDir() {
         try {
-            fs.rmSync(WWWEBJS_SESSION_DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-            logger.info('WhatsApp: Sessão local removida para novo login');
+            fs.rmSync(this.sessionDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+            this._logInfo('Sessão local removida para novo login');
         } catch (err) {
-            logger.warn('WhatsApp: Erro ao remover sessão local', err?.message || err);
+            this._logWarn('Erro ao remover sessão local', err?.message || err);
         }
         try {
-            const cacheDir = path.join(path.dirname(WWWEBJS_SESSION_DIR), '..', '.wwebjs_cache');
+            const cacheDir = path.join(WWEBJS_AUTH_ROOT, '.wwebjs_cache');
             if (fs.existsSync(cacheDir)) {
                 fs.rmSync(cacheDir, { recursive: true, force: true });
             }
@@ -1589,7 +1690,7 @@ class WhatsAppClient {
 
             if (!requireNewQR) {
                 try {
-                    const backup = await sessionBackup.backup({ force: true });
+                    const backup = await sessionBackup.backup({ force: true, sessionDir: this.sessionDir });
                     if (backup.success) {
                         logger.info('WhatsApp: Backup criado antes do logout');
                     }
@@ -1626,7 +1727,7 @@ class WhatsAppClient {
             setTimeout(async () => {
                 if (!requireNewQR) {
                     try {
-                        const restore = await sessionBackup.restore();
+                        const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
                         if (restore.success) {
                             logger.info('WhatsApp: Backup restaurado, tentando reconectar...');
                         }
@@ -1652,7 +1753,7 @@ class WhatsAppClient {
         this.isReady = false;
         this.qrCode = null;
         try {
-            const backup = await sessionBackup.backup({ force: true });
+            const backup = await sessionBackup.backup({ force: true, sessionDir: this.sessionDir });
             if (backup.success) logger.info('WhatsApp: Backup da sessão antes de encerrar');
         } catch (e) {
             logger.warn('WhatsApp: Erro ao fazer backup antes de encerrar', e?.message);
@@ -1682,7 +1783,7 @@ class WhatsAppClient {
                 2 * 60 * 1000
             );
 
-            const backup = await sessionBackup.backup({ force: true });
+            const backup = await sessionBackup.backup({ force: true, sessionDir: this.sessionDir });
             if (!backup.success) {
                 logger.warn(`WhatsApp: Backup pré-restart falhou (${backup.message || 'sem detalhes'})`);
             }
@@ -1715,7 +1816,7 @@ class WhatsAppClient {
         } catch (err) {
             logger.error(`WhatsApp: Falha na reinicialização controlada (${reason})`, err?.message || err);
             try {
-                const restore = await sessionBackup.restore();
+                const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
                 if (restore.success) {
                     logger.warn('WhatsApp: Sessão restaurada após falha no restart controlado, tentando inicializar novamente...');
                     await this.initialize();
@@ -1732,4 +1833,4 @@ class WhatsAppClient {
     }
 }
 
-export default new WhatsAppClient();
+

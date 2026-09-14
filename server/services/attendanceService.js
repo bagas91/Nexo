@@ -70,7 +70,7 @@ function buildChatHistory(chatId, limit) {
 }
 
 async function sendInboxReply(chatId, phone, text) {
-    const { default: whatsappClient } = await import('./whatsappClient.js');
+    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
     const id = String(chatId || '').trim();
     const digits = String(phone || '').replace(/\D/g, '');
     // @lid: tenta pelo chatId; se tiver telefone real (55…), manda também por número

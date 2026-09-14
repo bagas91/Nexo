@@ -146,7 +146,7 @@ async function flushGoianiaDigest() {
     ].filter(Boolean).join('\n');
 
     try {
-        const { default: whatsappClient } = await import('./whatsappClient.js');
+        const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
         for (const r of recipients) {
             try {
                 await whatsappClient.sendPrivateMessage(r.phone, text);
