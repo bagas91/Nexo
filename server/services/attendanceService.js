@@ -70,23 +70,8 @@ function buildChatHistory(chatId, limit) {
 }
 
 async function sendInboxReply(chatId, phone, text) {
-    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
-    const id = String(chatId || '').trim();
-    const digits = String(phone || '').replace(/\D/g, '');
-    // @lid: tenta pelo chatId; se tiver telefone real (55…), manda também por número
-    const looksLikeLidPhone = digits.length > 13 || (id.includes('@lid') && digits === id.replace(/\D/g, ''));
-    const realPhone = digits.length >= 10 && digits.length <= 13 && !looksLikeLidPhone ? digits : '';
-
-    if (id.includes('@lid') || !realPhone) {
-        try {
-            await whatsappClient.sendChatMessage(id, text);
-            return;
-        } catch (err) {
-            if (!realPhone) throw err;
-            logger.warn('Atendimento: envio @lid falhou, tentando número', err?.message || err);
-        }
-    }
-    await whatsappClient.sendPrivateMessage(realPhone, text);
+    const { sendEcommerceText } = await import('./ecommerceSend.js');
+    await sendEcommerceText({ chatId, phone, text });
 }
 
 function syncContactFromConversation({ phone, contactName }) {

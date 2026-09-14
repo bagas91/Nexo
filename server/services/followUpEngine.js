@@ -40,14 +40,10 @@ function shouldUseChatId(chatId, phone) {
 }
 
 async function sendFollowUpMessage(chatId, phone, text) {
-    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
+    const { sendEcommerceText } = await import('./ecommerceSend.js');
     const message = String(text || '').trim();
     if (!message) return;
-    if (shouldUseChatId(chatId, phone)) {
-        await whatsappClient.sendChatMessage(chatId, message);
-        return;
-    }
-    await whatsappClient.sendPrivateMessage(phone, message);
+    await sendEcommerceText({ chatId, phone, text: message });
 }
 
 function applyTag(phone, contactName, tagName) {
@@ -410,8 +406,12 @@ export async function processDueFollowUpRuns() {
     if (workerRunning) return;
     workerRunning = true;
     try {
-        const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
-        if (!whatsappClient.getStatus().ready) return;
+        const { isMetaConnected } = await import('./metaWhatsAppService.js');
+        const { isEcommerceWebForced, ecommerceClient } = await import('./whatsappHub.js');
+        const ready = isEcommerceWebForced()
+            ? !!ecommerceClient.getStatus().ready
+            : isMetaConnected();
+        if (!ready) return;
 
         await processIdleTriggers();
 

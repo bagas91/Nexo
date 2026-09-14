@@ -56,10 +56,13 @@ export async function processIdleHumanAlerts() {
                 && conv.waitMinutes <= maxWaitForCustomerMsg
             ) {
                 try {
-                    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
-                    if (whatsappClient.getStatus?.().ready) {
-                        await whatsappClient.sendChatMessage(conv.chatId, customerMsg);
-                    }
+                    const { sendEcommerceText } = await import('./ecommerceSend.js');
+                    await sendEcommerceText({
+                        chatId: conv.chatId,
+                        phone: conv.phone,
+                        text: customerMsg,
+                        contactName: conv.contactName,
+                    });
                 } catch (err) {
                     logger.warn('Idle human: falha ao avisar cliente', err?.message || err);
                 }

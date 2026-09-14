@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { ConnectionStatus, User } from '../types';
 import WhatsAppConnection from './WhatsAppConnection';
+import MetaWhatsAppConnection from './MetaWhatsAppConnection';
 import UsersView from './UsersView';
 import ApiSettingsView from './ApiSettingsView';
 import ProfileSettingsView from './ProfileSettingsView';
@@ -54,6 +55,7 @@ interface SettingsViewProps {
   onEcommerceConnect?: () => void;
   onEcommerceDisconnect?: () => void;
   onEcommercePairingCodeChange?: (code: string | null) => void;
+  onEcommerceCloudStatusChange?: (connected: boolean) => void;
 }
 
 const TABS: { id: SettingsTab; label: string }[] = [
@@ -95,6 +97,7 @@ const SettingsView: React.FC<SettingsViewProps> = ({
   onEcommerceConnect,
   onEcommerceDisconnect,
   onEcommercePairingCodeChange,
+  onEcommerceCloudStatusChange,
 }) => {
   const visibleTabs = useMemo(() => TABS.filter((t) => canTab(user, t.id)), [user]);
   const detailLabel = tab === 'bling' ? 'Bling ERP' : tab === 'woocommerce' ? 'WooCommerce' : null;
@@ -151,14 +154,14 @@ const SettingsView: React.FC<SettingsViewProps> = ({
             <div>
               <h2 className="bs-page-title">Conexões</h2>
               <p className="bs-page-desc mt-1">
-                Dois WhatsApps separados: um só para a Palavra do Dia / disparos, outro só para o e-commerce.
+                Disparo usa WhatsApp Web. E-commerce usa a Cloud API oficial da Meta.
               </p>
             </div>
             <div className="grid gap-6 lg:grid-cols-2">
               <WhatsAppConnection
                 role="dispatch"
                 title="Disparo — Palavra do Dia"
-                subtitle="Agendamentos, grupos e envios em massa"
+                subtitle="Agendamentos, grupos e envios em massa (WhatsApp Web)"
                 status={dispatchState.status}
                 qrCode={dispatchState.qrCode}
                 pairingCode={dispatchState.pairingCode}
@@ -172,21 +175,7 @@ const SettingsView: React.FC<SettingsViewProps> = ({
                 embedded
                 hidePageHeader
               />
-              <WhatsAppConnection
-                role="ecommerce"
-                title="E-commerce — CRM"
-                subtitle="Inbox, atendimento IA, pedidos e follow-ups"
-                status={ecommerceState.status}
-                qrCode={ecommerceState.qrCode}
-                pairingCode={ecommerceState.pairingCode}
-                pairingPhone={ecommerceState.pairingPhone}
-                onPairingCodeChange={onEcommercePairingCodeChange}
-                onConnect={onEcommerceConnect || (() => {})}
-                onDisconnect={onEcommerceDisconnect || (() => {})}
-                showSyncGroups={false}
-                embedded
-                hidePageHeader
-              />
+              <MetaWhatsAppConnection onStatusChange={onEcommerceCloudStatusChange} />
             </div>
           </div>
         )}

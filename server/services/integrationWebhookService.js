@@ -34,12 +34,13 @@ async function sendIntegrationWhatsApp(phone, text) {
     const message = String(text || '').trim();
     if (!digits || digits.length < 10 || !message) return { sent: false, reason: 'telefone ou mensagem inválidos' };
 
-    const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
-    if (!whatsappClient.getStatus().ready) {
-        return { sent: false, reason: 'WhatsApp não conectado' };
+    try {
+        const { sendEcommerceText } = await import('./ecommerceSend.js');
+        await sendEcommerceText({ phone: digits, text: message });
+        return { sent: true, phone: digits };
+    } catch (err) {
+        return { sent: false, reason: err?.message || String(err) };
     }
-    await whatsappClient.sendPrivateMessage(digits, message);
-    return { sent: true, phone: digits };
 }
 
 export async function processWooWebhook(eventType, payload = {}) {

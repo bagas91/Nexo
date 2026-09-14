@@ -146,10 +146,10 @@ async function flushGoianiaDigest() {
     ].filter(Boolean).join('\n');
 
     try {
-        const { ecommerceClient: whatsappClient } = await import('./whatsappHub.js');
+        const { sendEcommerceText } = await import('./ecommerceSend.js');
         for (const r of recipients) {
             try {
-                await whatsappClient.sendPrivateMessage(r.phone, text);
+                await sendEcommerceText({ phone: r.phone, text });
             } catch (err) {
                 logger.warn(`Fila Goiânia: falha ao notificar ${r.phone}`, err?.message || err);
             }

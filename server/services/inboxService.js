@@ -740,4 +740,74 @@ export async function refreshInboxAvatars(client) {
     logger.info(`Inbox: avatares — ${saved} salvos (url ${urlOk}, store ${storeOk}) de ${pending.length}`);
 }
 
-export default { persistInboxMessage, syncRecentInbox, refreshInboxAvatars, backfillLidPhones, backfillContactNames };
+/**
+ * Persiste mensagem inbound/outbound da Cloud API Meta (e-commerce).
+ * chatId padronizado: {digits}@c.us
+ */
+export async function persistMetaInboxMessage({
+    id,
+    phone,
+    contactName = '',
+    body,
+    fromMe = false,
+    ts = Date.now(),
+    mediaType = null,
+    silent = false,
+} = {}) {
+    const digits = String(phone || '').replace(/\D/g, '');
+    if (!digits || digits.length < 10) return false;
+    const chatId = `${digits}@c.us`;
+    const text = String(body || '').trim();
+    if (!text && !mediaType) return false;
+
+    const messageId = String(id || `meta_${digits}_${ts}`);
+    const saved = chatDB.saveInboxMessage({
+        id: messageId,
+        chatId,
+        phone: digits,
+        contactName: String(contactName || ''),
+        body: text || (mediaType ? `[${mediaType}]` : ''),
+        fromMe: !!fromMe,
+        ts: Number(ts) || Date.now(),
+        mediaType: mediaType || null,
+        mediaFile: null,
+        mimetype: null,
+    }, { silent });
+
+    if (saved && !fromMe && !silent) {
+        logger.info('Inbox: mensagem Meta registrada', {
+            from: `${digits.slice(0, 6)}…`,
+            preview: text.slice(0, 40),
+        });
+
+        const isNewContact = chatDB.countInboundMessages(chatId) === 1;
+
+        import('./followUpEngine.js').then(({ handleInboundMessage }) => {
+            handleInboundMessage({ chatId, phone: digits, contactName, body: text, isNewContact });
+        }).catch((err) => {
+            logger.warn('Inbox: falha follow ups (Meta)', err?.message || err);
+        });
+
+        import('./flowEngine.js').then(({ handleInboundMessageForFlows }) => {
+            handleInboundMessageForFlows({ chatId, phone: digits, contactName, body: text, isNewContact });
+        }).catch((err) => {
+            logger.warn('Inbox: falha fluxos (Meta)', err?.message || err);
+        });
+
+        import('./attendanceService.js').then(({ scheduleAgentReply }) => {
+            scheduleAgentReply({ chatId, phone: digits, contactName, body: text });
+        }).catch((err) => {
+            logger.warn('Inbox: falha agente (Meta)', err?.message || err);
+        });
+    }
+    return saved;
+}
+
+export default {
+    persistInboxMessage,
+    persistMetaInboxMessage,
+    syncRecentInbox,
+    refreshInboxAvatars,
+    backfillLidPhones,
+    backfillContactNames,
+};

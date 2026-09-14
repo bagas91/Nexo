@@ -22,6 +22,16 @@ import { createOAuthState, getRedirectUri } from '../routes/blingOAuth.js';
 import { testWooConnection, normalizeStoreUrl } from '../services/wooService.js';
 import { mergeWooConfig, maskWooConfigForClient, hasRealWooCredentials, getWooConsumerKey, getWooConsumerSecret } from '../utils/wooConfig.js';
 import { mergeBlingConfig, maskBlingConfigForClient } from '../utils/blingConfig.js';
+import { mergeMetaWhatsAppConfig, maskMetaWhatsAppConfigForClient } from '../utils/metaWhatsAppConfig.js';
+import {
+    verifyMetaWebhook,
+    validateMetaSignature,
+    handleMetaWebhookPayload,
+    saveMetaConfig,
+    getMetaConfigForClient,
+    sendTestMessage,
+    isMetaConnected,
+} from '../services/metaWhatsAppService.js';
 import { requireSuperadmin } from '../middleware/authMiddleware.js';
 import logger from '../utils/logger.js';
 
@@ -72,6 +82,43 @@ webhookRouter.post('/bling', async (req, res) => {
     }
 });
 
+/** Cloud API Meta — verificação (GET) e mensagens (POST). Público. */
+webhookRouter.get('/meta-whatsapp', (req, res) => {
+    try {
+        const result = verifyMetaWebhook(req.query || {});
+        if (result.ok) {
+            return res.status(200).send(result.challenge);
+        }
+        return res.status(403).json({ error: result.error || 'Forbidden' });
+    } catch (err) {
+        logger.error('Webhook Meta verify', err?.message || err);
+        return res.status(500).json({ error: err?.message || String(err) });
+    }
+});
+
+webhookRouter.post('/meta-whatsapp', async (req, res) => {
+    try {
+        const signature = req.headers['x-hub-signature-256'];
+        const raw = typeof req.rawBody === 'string'
+            ? req.rawBody
+            : Buffer.isBuffer(req.rawBody)
+                ? req.rawBody.toString('utf8')
+                : JSON.stringify(req.body || {});
+        if (!validateMetaSignature(raw, signature)) {
+            logger.warn('Webhook Meta: assinatura inválida');
+            return res.status(401).json({ error: 'Assinatura inválida' });
+        }
+
+        res.status(200).json({ success: true });
+        handleMetaWebhookPayload(req.body || {}).catch((err) => {
+            logger.error('Webhook Meta process', err?.message || err);
+        });
+    } catch (err) {
+        logger.error('Webhook Meta', err?.message || err);
+        if (!res.headersSent) res.status(500).json({ error: err?.message || String(err) });
+    }
+});
+
 // --- KV settings ---
 router.get('/kv/:key', (req, res) => {
     ensurePlatformDefaults();
@@ -88,6 +135,9 @@ ensurePlatformSeeds();
     }
     if (req.params.key === 'woocommerce' && value) {
         return res.json(maskWooConfigForClient(value));
+    }
+    if (req.params.key === 'meta_whatsapp') {
+        return res.json(maskMetaWhatsAppConfigForClient(value || {}));
     }
     if (req.params.key === 'attendance') {
         return res.json(getAttendanceConfig());
@@ -109,12 +159,15 @@ router.put('/kv/:key', requireSuperadmin, (req, res) => {
             ...merged,
             storeUrl: normalizeStoreUrl(merged.storeUrl || req.body?.storeUrl),
         };
+    } else if (key === 'meta_whatsapp') {
+        body = mergeMetaWhatsAppConfig(chatDB.getPlatformKv('meta_whatsapp'), req.body);
     }
     chatDB.setPlatformKv(key, body);
     const saved = chatDB.getPlatformKv(key);
     let responseValue = saved;
     if (key === 'bling') responseValue = maskBlingConfigForClient(saved);
     if (key === 'woocommerce') responseValue = maskWooConfigForClient(saved);
+    if (key === 'meta_whatsapp') responseValue = maskMetaWhatsAppConfigForClient(saved);
     res.json({ success: true, value: responseValue });
 });
 
@@ -391,6 +444,36 @@ router.patch('/crm/deals/:id', (req, res) => {
     try {
         const deal = updateCrmDeal(req.params.id, req.body || {});
         res.json({ success: true, deal });
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+// --- Meta Cloud API (e-commerce) ---
+router.get('/meta-whatsapp', (_req, res) => {
+    res.json(getMetaConfigForClient());
+});
+
+router.put('/meta-whatsapp', requireSuperadmin, (req, res) => {
+    try {
+        const value = saveMetaConfig(req.body || {});
+        res.json({ success: true, value });
+    } catch (err) {
+        res.status(400).json({ error: err?.message || String(err) });
+    }
+});
+
+router.post('/meta-whatsapp/test', requireSuperadmin, async (req, res) => {
+    try {
+        if (!isMetaConnected()) {
+            return res.status(409).json({ error: 'Cloud API Meta não configurada/conectada.' });
+        }
+        const phone = String(req.body?.phone || '').replace(/\D/g, '');
+        if (phone.length < 10) {
+            return res.status(400).json({ error: 'Informe phone com DDI (ex.: 5511999999999).' });
+        }
+        const result = await sendTestMessage(phone, req.body?.text);
+        res.json({ success: true, ...result });
     } catch (err) {
         res.status(400).json({ error: err?.message || String(err) });
     }

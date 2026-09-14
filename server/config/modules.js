@@ -169,6 +169,7 @@ export function resolveApiModule(path, method = 'GET') {
     if (p.startsWith('/api/admin')) return 'superadmin';
     if (p.startsWith('/api/platform/bling')) return 'superadmin';
     if (p.startsWith('/api/platform/woocommerce')) return 'superadmin';
+    if (p.startsWith('/api/platform/meta-whatsapp')) return 'superadmin';
     if (p === '/api/platform/kv' || p.startsWith('/api/platform/kv/')) {
         if (m === 'GET') return null; // leitura de config genérica (UI filtra)
         return 'superadmin';

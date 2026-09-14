@@ -497,6 +497,34 @@ export class BackendService {
     }
   }
 
+  async getMetaWhatsAppConfig(): Promise<Record<string, unknown>> {
+    const res = await fetch(`${API_BASE}/platform/meta-whatsapp`, { headers: this.headers() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erro ao carregar Cloud API Meta');
+    return data;
+  }
+
+  async saveMetaWhatsAppConfig(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const res = await fetch(`${API_BASE}/platform/meta-whatsapp`, {
+      method: 'PUT',
+      headers: this.headers(true),
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Erro ao salvar Cloud API Meta');
+    return (data.value || data) as Record<string, unknown>;
+  }
+
+  async testMetaWhatsApp(phone: string, text?: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/platform/meta-whatsapp/test`, {
+      method: 'POST',
+      headers: this.headers(true),
+      body: JSON.stringify({ phone, text }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Falha no teste Cloud API');
+  }
+
   async getCategories(): Promise<Category[]> {
     try {
       const res = await fetch(`${API_BASE}/categories`, { headers: this.headers() });

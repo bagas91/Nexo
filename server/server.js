@@ -132,7 +132,15 @@ const DAILY_RESTART_TZ = process.env.DAILY_RESTART_TZ || 'America/Sao_Paulo';
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '96mb' }));
+app.use(express.json({
+    limit: '96mb',
+    verify: (req, _res, buf) => {
+        // Necessário para validar X-Hub-Signature-256 do webhook Meta
+        if (req.originalUrl?.startsWith('/api/webhooks/meta-whatsapp')) {
+            req.rawBody = Buffer.from(buf);
+        }
+    },
+}));
 app.use(express.urlencoded({ limit: '96mb', extended: true }));
 
 let sendInProgressCount = 0;
@@ -350,8 +358,12 @@ app.post('/api/inbox/conversations/:chatId/test-agent', async (req, res) => {
         const chatId = decodeURIComponent(req.params.chatId);
         const conv = chatDB.getInboxConversation(chatId);
         if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' });
-        const status = ecommerceClient.getStatus();
-        if (!status.ready) return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
+        const { isMetaConnected } = await import('./services/metaWhatsAppService.js');
+        const { isEcommerceWebForced, ecommerceClient } = await import('./services/whatsappHub.js');
+        const ready = isEcommerceWebForced()
+            ? !!ecommerceClient.getStatus().ready
+            : isMetaConnected();
+        if (!ready) return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
         const { scheduleAgentReply } = await import('./services/attendanceService.js');
         scheduleAgentReply({
             chatId,
@@ -393,9 +405,21 @@ app.get('/api/inbox/avatars/:filename', async (req, res) => {
 
 app.post('/api/inbox/sync', async (req, res) => {
     try {
+        const { isMetaConnected } = await import('./services/metaWhatsAppService.js');
+        const { isEcommerceWebForced, ecommerceClient } = await import('./services/whatsappHub.js');
+        if (!isEcommerceWebForced()) {
+            if (!isMetaConnected()) {
+                return res.status(409).json({ error: 'Cloud API Meta não configurada' });
+            }
+            return res.json({
+                success: true,
+                skipped: true,
+                reason: 'E-commerce usa webhook da Cloud API — não há sync de chat Web.',
+            });
+        }
         const status = ecommerceClient.getStatus();
         if (!status.ready) {
-            return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
+            return res.status(409).json({ error: 'WhatsApp E-commerce Web não conectado' });
         }
         const { syncRecentInbox } = await import('./services/inboxService.js');
         const result = await syncRecentInbox(ecommerceClient.client);
@@ -413,15 +437,8 @@ app.post('/api/inbox/reply', async (req, res) => {
         if (!digits || !message) {
             return res.status(400).json({ error: 'Informe phone e text' });
         }
-        const status = ecommerceClient.getStatus();
-        if (!status.ready) {
-            return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
-        }
-        if (chatId && String(chatId).includes('@')) {
-            await ecommerceClient.sendChatMessage(chatId, message);
-        } else {
-            await ecommerceClient.sendPrivateMessage(digits, message);
-        }
+        const { sendEcommerceText } = await import('./services/ecommerceSend.js');
+        await sendEcommerceText({ chatId, phone: digits, text: message });
         if (chatId) {
             chatDB.setInboxConversationMode(chatId, 'human');
             chatDB.setInboxConversationStatus(chatId, 'open');
@@ -434,7 +451,16 @@ app.post('/api/inbox/reply', async (req, res) => {
 
 userService.initSeedSuperadmin();
 
-const sendWhatsAppAlertMessage = (number, msg) => ecommerceClient.sendPrivateMessage(number, msg);
+const sendWhatsAppAlertMessage = async (number, msg) => {
+    try {
+        const { sendEcommerceText } = await import('./services/ecommerceSend.js');
+        await sendEcommerceText({ phone: number, text: msg });
+    } catch (err) {
+        // Fallback: alerta operacional pelo número de Disparo se Cloud API falhar
+        logger.warn('Alerta via E-commerce falhou, tentando Disparo', err?.message || err);
+        await dispatchClient.sendPrivateMessage(number, msg);
+    }
+};
 notifier.setWhatsAppAlertSender(sendWhatsAppAlertMessage);
 bulkSendReport.setWhatsAppReportSender(sendWhatsAppAlertMessage);
 
@@ -700,7 +726,8 @@ app.get('/api/health', (req, res) => {
             ok: true,
             whatsapp: mapState(instances.dispatch),
             whatsappDispatch: mapState(instances.dispatch),
-            whatsappEcommerce: mapState(instances.ecommerce),
+            whatsappEcommerce: instances.ecommerce?.ready ? 'connected' : 'disconnected',
+            ecommerceProvider: instances.ecommerce?.provider || 'meta_cloud',
             schedulesPending,
             ...getSendActivity()
         });
@@ -2172,9 +2199,11 @@ app.listen(PORT, () => {
         dispatchClient.setOnReadyCallback(() => {
             runScheduleWorker().catch((err) => logger.error('Worker agendamentos (onReady)', err?.message || err));
         });
-        ecommerceClient.setOnReadyCallback(() => {
-            processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (onReady)', err?.message || err));
-        });
+        if (process.env.META_WA_FORCE_WEB === '1' || process.env.META_WA_FORCE_WEB === 'true') {
+            ecommerceClient.setOnReadyCallback(() => {
+                processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (onReady)', err?.message || err));
+            });
+        }
         processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups (inicial)', err?.message || err));
         setInterval(() => processDueFollowUpRuns().catch((err) => logger.error('Worker follow ups', err?.message || err)), FOLLOWUP_WORKER_INTERVAL_MS);
     }).catch((err) => logger.error('FollowUp engine não carregou', err?.message || err));

@@ -130,21 +130,32 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
         }
 
         if (ecomInst) {
-          const eStatus = ecomInst.status as ConnectionStatus;
-          if (ecomInst.qr && eStatus === ConnectionStatus.QR_READY) setEcommerceQr(ecomInst.qr);
-          if (ecomInst.pairingCode && eStatus === ConnectionStatus.PAIRING_CODE_READY) {
-            setEcommercePairingCode(ecomInst.pairingCode);
-            if (ecomInst.pairingPhone) setEcommercePairingPhone(ecomInst.pairingPhone);
-          }
-          if (eStatus === ConnectionStatus.CONNECTED) {
-            setEcommerceStatus(ConnectionStatus.CONNECTED);
+          const eStatus = (ecomInst.status as ConnectionStatus)
+            || (ecomInst.ready ? ConnectionStatus.CONNECTED : ConnectionStatus.DISCONNECTED);
+          const provider = (ecomInst as { provider?: string }).provider;
+          if (provider === 'meta_cloud' || eStatus === ConnectionStatus.CONNECTED || eStatus === ConnectionStatus.DISCONNECTED) {
+            setEcommerceStatus(ecomInst.ready || eStatus === ConnectionStatus.CONNECTED
+              ? ConnectionStatus.CONNECTED
+              : ConnectionStatus.DISCONNECTED);
             setEcommerceQr(null);
             setEcommercePairingCode(null);
             setEcommercePairingPhone(null);
-          } else if (eStatus === ConnectionStatus.DISCONNECTED) {
-            setEcommerceStatus(ConnectionStatus.DISCONNECTED);
           } else {
-            setEcommerceStatus(eStatus);
+            if (ecomInst.qr && eStatus === ConnectionStatus.QR_READY) setEcommerceQr(ecomInst.qr);
+            if (ecomInst.pairingCode && eStatus === ConnectionStatus.PAIRING_CODE_READY) {
+              setEcommercePairingCode(ecomInst.pairingCode);
+              if (ecomInst.pairingPhone) setEcommercePairingPhone(ecomInst.pairingPhone);
+            }
+            if (eStatus === ConnectionStatus.CONNECTED) {
+              setEcommerceStatus(ConnectionStatus.CONNECTED);
+              setEcommerceQr(null);
+              setEcommercePairingCode(null);
+              setEcommercePairingPhone(null);
+            } else if (eStatus === ConnectionStatus.DISCONNECTED) {
+              setEcommerceStatus(ConnectionStatus.DISCONNECTED);
+            } else {
+              setEcommerceStatus(eStatus);
+            }
           }
         }
       } catch (err) {
@@ -508,6 +519,9 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
                 setChats([]);
                 await loadChatsProgressively();
                 setIsLoading(false);
+              }}
+              onEcommerceCloudStatusChange={(connected) => {
+                setEcommerceStatus(connected ? ConnectionStatus.CONNECTED : ConnectionStatus.DISCONNECTED);
               }}
               syncing={chatsSyncing || isLoading}
             />

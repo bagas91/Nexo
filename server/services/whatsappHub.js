@@ -1,7 +1,7 @@
 /**
- * Hub de duas sessões WhatsApp:
- * - dispatch: Palavra do Dia, grupos, agendamentos, disparos
- * - ecommerce: CRM, inbox, atendimento IA, follow-ups, pedidos
+ * Hub WhatsApp:
+ * - dispatch: Palavra do Dia / grupos / agendamentos (whatsapp-web.js)
+ * - ecommerce: CRM via Cloud API Meta (sem segundo Chrome, por padrão)
  */
 import {
     WhatsAppClient,
@@ -9,6 +9,7 @@ import {
     WA_ROLE_META,
     resolveSessionDir,
 } from './whatsappClient.js';
+import { getMetaEcommerceStatus } from './metaWhatsAppService.js';
 
 export { WA_ROLES, WA_ROLE_META, resolveSessionDir };
 
@@ -20,6 +21,7 @@ export const dispatchClient = new WhatsAppClient({
     enableGroupSync: true,
 });
 
+/** Mantido só se META_WA_FORCE_WEB=1 (legado). Caso contrário o e-commerce é Cloud API. */
 export const ecommerceClient = new WhatsAppClient({
     role: WA_ROLES.ECOMMERCE,
     clientId: 'ecommerce',
@@ -32,6 +34,10 @@ const BY_ROLE = {
     [WA_ROLES.DISPATCH]: dispatchClient,
     [WA_ROLES.ECOMMERCE]: ecommerceClient,
 };
+
+export function isEcommerceWebForced() {
+    return process.env.META_WA_FORCE_WEB === '1' || process.env.META_WA_FORCE_WEB === 'true';
+}
 
 export function normalizeWaRole(value, fallback = WA_ROLES.DISPATCH) {
     const v = String(value || '').trim().toLowerCase();
@@ -57,23 +63,27 @@ export function getWaFromRequest(req, fallback = WA_ROLES.DISPATCH) {
 export function getAllWaStatuses() {
     return {
         dispatch: dispatchClient.getStatus(),
-        ecommerce: ecommerceClient.getStatus(),
+        ecommerce: isEcommerceWebForced()
+            ? ecommerceClient.getStatus()
+            : getMetaEcommerceStatus(),
     };
 }
 
 export async function initializeAllWhatsApp() {
-    // Disparo primeiro (sessão legada); e-commerce em seguida para não competir pelo CPU no boot.
     await dispatchClient.initialize();
-    await new Promise((r) => setTimeout(r, 2500));
-    await ecommerceClient.initialize();
+    if (isEcommerceWebForced()) {
+        await new Promise((r) => setTimeout(r, 2500));
+        await ecommerceClient.initialize();
+    }
 }
 
 export async function destroyAllWhatsAppGracefully() {
-    await Promise.allSettled([
-        dispatchClient.destroyGracefully?.() ?? Promise.resolve(),
-        ecommerceClient.destroyGracefully?.() ?? Promise.resolve(),
-    ]);
+    const tasks = [dispatchClient.destroyGracefully?.() ?? Promise.resolve()];
+    if (isEcommerceWebForced()) {
+        tasks.push(ecommerceClient.destroyGracefully?.() ?? Promise.resolve());
+    }
+    await Promise.allSettled(tasks);
 }
 
-/** Compat: default = Disparo (comportamento antigo para quem importava o singleton). */
+/** Compat: default = Disparo. */
 export default dispatchClient;
