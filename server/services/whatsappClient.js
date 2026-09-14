@@ -43,6 +43,13 @@ function withOperationTimeout(promise, timeoutMs, label) {
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 const MEDIA_UPLOAD_RETRYABLE = /media entry was not created|upload failed|media-fault|promise was collected|protocol error \(runtime\.callfunctionon\)|timeout ao enviar mídia|não confirmou o envio/i;
+/** ACK vazio: a mídia muitas vezes já chegou no chat; não deve bloquear texto nem marcar o grupo como falha. */
+const EMPTY_MEDIA_ACK_MSG = 'WhatsApp não confirmou o envio do anexo (resposta vazia)';
+
+function isSoftEmptyMediaAck(errMsg) {
+    return String(errMsg || '').includes(EMPTY_MEDIA_ACK_MSG)
+        || /não confirmou o envio do anexo \(resposta vazia\)/i.test(String(errMsg || ''));
+}
 
 function isNewsletterChatId(chatId) {
     return /@\w*newsletter\b/.test(String(chatId || ''));
@@ -1324,12 +1331,17 @@ class WhatsAppClient {
                     timeoutMs
                 );
                 if (!sent) {
-                    throw new Error('WhatsApp não confirmou o envio do anexo (resposta vazia)');
+                    // Em várias versões do WA Web o upload entrega a mídia mas o ACK vem vazio.
+                    // Tratar como sucesso suave evita pular o texto (text_separate) e marcar 0/N falhas.
+                    logger.warn(
+                        `WhatsApp: anexo "${safeName}" sem ACK (${EMPTY_MEDIA_ACK_MSG}) — considerando enviado`
+                    );
+                    return { softAck: true };
                 }
                 if (i > 0) {
                     logger.info(`WhatsApp: anexo "${safeName}" enviado com fallback (${strategyLabel})`);
                 }
-                return;
+                return { softAck: false };
             } catch (err) {
                 lastErr = err;
                 const errMsg = (err && err.message) ? String(err.message) : String(err);
@@ -1435,10 +1447,11 @@ class WhatsAppClient {
                     const visuals = sortedAttachments.filter((f) => isImageOrVideoFile(f));
                     const others = sortedAttachments.filter((f) => !isImageOrVideoFile(f));
                     await sendAttachmentsLoop(visuals, undefined);
-                    if (!failedAttachments.length) {
-                        await this._sendTextMessage(chatId, messageText, sendOpts);
-                        messageText = '';
-                    }
+                    // Sempre tenta o texto após a imagem — falha soft (ACK vazio) não deve bloquear.
+                    await new Promise((r) => setTimeout(r, DELAY_BETWEEN_ATTACHMENTS_MS));
+                    await this._sendTextMessage(chatId, messageText, sendOpts);
+                    messageText = '';
+                    await new Promise((r) => setTimeout(r, DELAY_BETWEEN_ATTACHMENTS_MS));
                     await sendAttachmentsLoop(others, undefined);
                 } else if (mediaLayout === MEDIA_LAYOUTS.SHORT_CAPTION_PLUS_TEXT && hasVisual && messageText) {
                     const { shortCaption, remainder } = splitTextForShortCaption(messageText);
@@ -1454,7 +1467,7 @@ class WhatsAppClient {
                             throw err;
                         }
                     }
-                    if (remainder && !failedAttachments.length) {
+                    if (remainder) {
                         await this._sendTextMessage(chatId, remainder, sendOpts);
                     }
                     messageText = '';
@@ -1487,8 +1500,14 @@ class WhatsAppClient {
             }
 
             if (failedAttachments.length > 0) {
-                const summary = failedAttachments.map((f) => `${f.name}: ${f.error}`).join('; ');
-                throw new Error(`Falha em ${failedAttachments.length} anexo(s): ${summary}`);
+                const hardFails = failedAttachments.filter((f) => !isSoftEmptyMediaAck(f.error));
+                if (hardFails.length > 0) {
+                    const summary = hardFails.map((f) => `${f.name}: ${f.error}`).join('; ');
+                    throw new Error(`Falha em ${hardFails.length} anexo(s): ${summary}`);
+                }
+                logger.warn(
+                    `WhatsApp: ${failedAttachments.length} anexo(s) sem ACK em "${chatName}" — mídia provavelmente entregue; seguindo como sucesso`
+                );
             }
 
             if (messageText) {
