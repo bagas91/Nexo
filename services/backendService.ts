@@ -875,8 +875,9 @@ export class BackendService {
     return data.user;
   }
 
-  async getInboxConversations() {
-    const res = await fetch(`${API_BASE}/inbox/conversations`, { headers: this.headers() });
+  async getInboxConversations(channel?: 'dispatch' | 'ecommerce') {
+    const q = channel ? `?channel=${encodeURIComponent(channel)}` : '';
+    const res = await fetch(`${API_BASE}/inbox/conversations${q}`, { headers: this.headers() });
     const data = await res.json().catch(() => []);
     if (!res.ok) throw new Error((data as { error?: string }).error || 'Erro ao carregar conversas');
     return data as Array<{
@@ -887,6 +888,7 @@ export class BackendService {
       unread: number;
       status: string;
       mode: 'bot' | 'human';
+      channel?: 'dispatch' | 'ecommerce';
       updatedAt: number;
       avatarUrl: string | null;
       needsHuman?: boolean;

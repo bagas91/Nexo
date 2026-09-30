@@ -34,7 +34,7 @@ interface AdminAppProps {
 function firstAllowedView(user: User): View {
   if (user.role === 'superadmin') return 'dashboard';
   const order: View[] = [
-    'dashboard', 'crm', 'contacts', 'campaigns',
+    'dashboard', 'crm_dispatch', 'crm_ecommerce', 'crm', 'contacts', 'campaigns',
     'catalog', 'templates', 'scheduler', 'groupdispatch',
     'followups', 'aiagents', 'flows', 'calendar', 'groups', 'history',
   ];
@@ -78,9 +78,9 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
   const backend = BackendService.getInstance();
 
   const navigateTo = useCallback((v: View) => {
-    if (v === 'conversations') {
+    if (v === 'conversations' || v === 'crm') {
       setCrmTab('atendimento');
-      setView('crm');
+      setView('crm_ecommerce');
     } else {
       setView(v);
     }
@@ -93,7 +93,7 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
       || status === ConnectionStatus.PAIRING_CODE_READY
       || ecommerceStatus === ConnectionStatus.QR_READY
       || ecommerceStatus === ConnectionStatus.PAIRING_CODE_READY;
-    const pollMs = busy ? 4000 : 1500;
+    const pollMs = busy ? 1200 : 2500;
     const interval = setInterval(async () => {
       try {
         const statusData = await backend.getStatus();
@@ -134,12 +134,13 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
             || (ecomInst.ready ? ConnectionStatus.CONNECTED : ConnectionStatus.DISCONNECTED);
           const provider = (ecomInst as { provider?: string }).provider;
           if (provider === 'meta_cloud' || eStatus === ConnectionStatus.CONNECTED || eStatus === ConnectionStatus.DISCONNECTED) {
-            setEcommerceStatus(ecomInst.ready || eStatus === ConnectionStatus.CONNECTED
+            const next = ecomInst.ready || eStatus === ConnectionStatus.CONNECTED
               ? ConnectionStatus.CONNECTED
-              : ConnectionStatus.DISCONNECTED);
-            setEcommerceQr(null);
-            setEcommercePairingCode(null);
-            setEcommercePairingPhone(null);
+              : ConnectionStatus.DISCONNECTED;
+            setEcommerceStatus((prev) => (prev === next ? prev : next));
+            setEcommerceQr((q) => (q == null ? q : null));
+            setEcommercePairingCode((c) => (c == null ? c : null));
+            setEcommercePairingPhone((p) => (p == null ? p : null));
           } else {
             if (ecomInst.qr && eStatus === ConnectionStatus.QR_READY) setEcommerceQr(ecomInst.qr);
             if (ecomInst.pairingCode && eStatus === ConnectionStatus.PAIRING_CODE_READY) {
@@ -257,6 +258,11 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
     setIsLoading(false);
   };
 
+  const handleEcommerceCloudStatusChange = useCallback((connected: boolean) => {
+    const next = connected ? ConnectionStatus.CONNECTED : ConnectionStatus.DISCONNECTED;
+    setEcommerceStatus((prev) => (prev === next ? prev : next));
+  }, []);
+
   const handleConnect = async (role: 'dispatch' | 'ecommerce' = 'dispatch') => {
     const setSt = role === 'ecommerce' ? setEcommerceStatus : setStatus;
     const setQr = role === 'ecommerce' ? setEcommerceQr : setQrCode;
@@ -358,7 +364,7 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
     setSchedules(deduped);
   };
 
-  const noChatViews: View[] = ['library', 'settings', 'whatsapp', 'templates', 'calendar', 'followups', 'aiagents', 'flows', 'contacts', 'conversations', 'crm', 'campaigns', 'catalog', 'admin'];
+  const noChatViews: View[] = ['library', 'settings', 'whatsapp', 'templates', 'calendar', 'followups', 'aiagents', 'flows', 'contacts', 'conversations', 'crm', 'crm_dispatch', 'crm_ecommerce', 'campaigns', 'catalog', 'admin'];
   const skipChatLoad = noChatViews.includes(view);
   const isConnected = status === ConnectionStatus.CONNECTED;
   const isEcommerceConnected = ecommerceStatus === ConnectionStatus.CONNECTED;
@@ -471,8 +477,15 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
           {view === 'aiagents' && <AiAgentsView />}
           {view === 'flows' && <FlowsView />}
           {view === 'contacts' && <ContactsView />}
-          {view === 'crm' && <CrmView tab={crmTab} onTabChange={setCrmTab} />}
-          {view === 'conversations' && <CrmView tab="atendimento" onTabChange={setCrmTab} />}
+          {view === 'crm_dispatch' && (
+            <CrmView channel="dispatch" tab={crmTab} onTabChange={setCrmTab} />
+          )}
+          {view === 'crm_ecommerce' && (
+            <CrmView channel="ecommerce" tab={crmTab} onTabChange={setCrmTab} />
+          )}
+          {(view === 'crm' || view === 'conversations') && (
+            <CrmView channel="ecommerce" tab={crmTab} onTabChange={setCrmTab} />
+          )}
           {view === 'campaigns' && <CampaignsView />}
           {view === 'catalog' && <CatalogQualityView />}
           {view === 'admin' && isSuperadmin && <AdminControlView />}
@@ -520,9 +533,7 @@ const AdminApp: React.FC<AdminAppProps> = ({ user, onLogout }) => {
                 await loadChatsProgressively();
                 setIsLoading(false);
               }}
-              onEcommerceCloudStatusChange={(connected) => {
-                setEcommerceStatus(connected ? ConnectionStatus.CONNECTED : ConnectionStatus.DISCONNECTED);
-              }}
+              onEcommerceCloudStatusChange={handleEcommerceCloudStatusChange}
               syncing={chatsSyncing || isLoading}
             />
           )}

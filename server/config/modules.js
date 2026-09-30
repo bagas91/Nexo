@@ -9,8 +9,8 @@
 export const APP_MODULES = [
     { id: 'dashboard', label: 'Dashboard', group: 'inicio', groupLabel: 'Início' },
     { id: 'contacts', label: 'Contatos', group: 'atendimento', groupLabel: 'Atendimento' },
-    // 'conversations' é restrito ao superadmin (WhatsApp pessoal conectado) — não é atribuível.
-    { id: 'crm', label: 'CRM', group: 'atendimento', groupLabel: 'Atendimento' },
+    { id: 'crm_dispatch', label: 'CRM Palavra (disparo)', group: 'atendimento', groupLabel: 'Atendimento' },
+    { id: 'crm_ecommerce', label: 'CRM Loja (e-commerce)', group: 'atendimento', groupLabel: 'Atendimento' },
     { id: 'campaigns', label: 'Campanhas', group: 'atendimento', groupLabel: 'Atendimento' },
     { id: 'templates', label: 'Templates', group: 'ferramentas', groupLabel: 'Ferramentas' },
     { id: 'scheduler', label: 'Agendamentos', group: 'ferramentas', groupLabel: 'Ferramentas' },
@@ -51,7 +51,9 @@ export const VIEW_TO_MODULE = {
     dashboard: 'dashboard',
     contacts: 'contacts',
     conversations: 'conversations',
-    crm: 'crm',
+    crm: 'crm_ecommerce',
+    crm_dispatch: 'crm_dispatch',
+    crm_ecommerce: 'crm_ecommerce',
     campaigns: 'campaigns',
     templates: 'templates',
     scheduler: 'scheduler',
@@ -87,7 +89,7 @@ export const SETTINGS_TAB_TO_MODULE = {
 const ENTITY_TO_MODULE = {
     contacts: 'contacts',
     conversations: null, // só superadmin
-    deals: 'crm',
+    deals: 'crm_ecommerce|crm_dispatch|crm',
     campaigns: 'campaigns',
     followups: 'followups',
     agents: 'aiagents',
@@ -98,6 +100,7 @@ const ENTITY_TO_MODULE = {
 
 /**
  * Normaliza lista de módulos vindos do cliente.
+ * Legado "crm" → crm_dispatch + crm_ecommerce.
  * @param {unknown} raw
  * @returns {string[]}
  */
@@ -105,11 +108,19 @@ export function normalizeModules(raw) {
     if (!Array.isArray(raw)) return [];
     const out = [];
     const seen = new Set();
-    for (const item of raw) {
-        const id = String(item || '').trim();
-        if (!ASSIGNABLE_SET.has(id) || seen.has(id)) continue;
+    const push = (id) => {
+        if (!ASSIGNABLE_SET.has(id) || seen.has(id)) return;
         seen.add(id);
         out.push(id);
+    };
+    for (const item of raw) {
+        const id = String(item || '').trim();
+        if (id === 'crm') {
+            push('crm_dispatch');
+            push('crm_ecommerce');
+            continue;
+        }
+        push(id);
     }
     return out;
 }
@@ -134,7 +145,29 @@ export function userHasModule(user, moduleId) {
     if (moduleId === 'settings_profile') return true;
     const mods = Array.isArray(user.modules) ? user.modules : [];
     if (mods.includes('*')) return true;
-    return mods.includes(moduleId);
+    if (mods.includes(moduleId)) return true;
+    if ((moduleId === 'crm_dispatch' || moduleId === 'crm_ecommerce') && mods.includes('crm')) {
+        return true;
+    }
+    if (moduleId === 'crm' && (mods.includes('crm_dispatch') || mods.includes('crm_ecommerce'))) {
+        return true;
+    }
+    return false;
+}
+
+/** Aceita "a|b|c" — usuário precisa de pelo menos um. */
+export function userHasAnyOfModules(user, moduleSpec) {
+    const parts = String(moduleSpec || '').split('|').map((s) => s.trim()).filter(Boolean);
+    if (!parts.length) return false;
+    return parts.some((id) => userHasModule(user, id));
+}
+
+export function userHasAnyCrm(user) {
+    return userHasAnyOfModules(user, 'crm_dispatch|crm_ecommerce|crm');
+}
+
+export function crmModuleForChannel(channel) {
+    return channel === 'ecommerce' ? 'crm_ecommerce' : 'crm_dispatch';
 }
 
 export function userHasAnyAppModule(user) {
@@ -190,11 +223,11 @@ export function resolveApiModule(path, method = 'GET') {
         return 'catalog_quality';
     }
 
-    // Inbox / conversas WhatsApp — módulo CRM (atendimento assistido) ou superadmin
-    if (p.startsWith('/api/inbox')) return 'crm';
+    // Inbox / conversas WhatsApp — qualquer CRM (Palavra ou Loja)
+    if (p.startsWith('/api/inbox')) return 'crm_dispatch|crm_ecommerce|crm';
 
     // CRM (ficha, pipeline, pedidos Bling)
-    if (p.startsWith('/api/platform/crm')) return 'crm';
+    if (p.startsWith('/api/platform/crm')) return 'crm_dispatch|crm_ecommerce|crm';
 
     // Platform entities
     const entMatch = p.match(/^\/api\/platform\/entities\/([^/]+)/);
@@ -246,6 +279,9 @@ export default {
     normalizeModules,
     parseModulesJson,
     userHasModule,
+    userHasAnyOfModules,
+    userHasAnyCrm,
+    crmModuleForChannel,
     userHasAnyAppModule,
     resolveApiModule,
 };

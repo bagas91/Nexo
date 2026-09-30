@@ -56,12 +56,13 @@ export async function processIdleHumanAlerts() {
                 && conv.waitMinutes <= maxWaitForCustomerMsg
             ) {
                 try {
-                    const { sendEcommerceText } = await import('./ecommerceSend.js');
-                    await sendEcommerceText({
+                    const { sendInboxOutbound } = await import('./inboxOutbound.js');
+                    await sendInboxOutbound({
                         chatId: conv.chatId,
                         phone: conv.phone,
                         text: customerMsg,
                         contactName: conv.contactName,
+                        channel: conv.channel,
                     });
                 } catch (err) {
                     logger.warn('Idle human: falha ao avisar cliente', err?.message || err);

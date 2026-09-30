@@ -48,11 +48,19 @@ type Props = {
   phone: string;
   contactName: string;
   conversationId?: string;
+  channel?: 'dispatch' | 'ecommerce';
   className?: string;
   onProfileChange?: () => void;
 };
 
-const CrmCustomerPanel: React.FC<Props> = ({ phone, contactName, conversationId, className = '', onProfileChange }) => {
+const CrmCustomerPanel: React.FC<Props> = ({
+  phone,
+  contactName,
+  conversationId,
+  channel = 'ecommerce',
+  className = '',
+  onProfileChange,
+}) => {
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -153,11 +161,14 @@ const CrmCustomerPanel: React.FC<Props> = ({ phone, contactName, conversationId,
       await platformService.createCrmDeal({
         phone,
         contactName: contact?.name || contactName,
-        title: `Venda assistida — ${contact?.name || contactName}`,
+        title: channel === 'dispatch'
+          ? `Atendimento — ${contact?.name || contactName}`
+          : `Venda assistida — ${contact?.name || contactName}`,
         stage: 'attending',
         source: 'whatsapp',
         conversationId,
         value: 0,
+        channel,
       });
       showToast('Oportunidade criada no pipeline.', 'success');
       await loadProfile();

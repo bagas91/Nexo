@@ -6,7 +6,9 @@
 import logger from '../utils/logger.js';
 import chatDB from '../db/database.js';
 
-const API_BASE = 'https://www.bling.com.br/Api/v3';
+const API_BASE = 'https://api.bling.com.br/Api/v3';
+const OAUTH_AUTHORIZE = 'https://www.bling.com.br/Api/v3/oauth/authorize';
+const OAUTH_TOKEN = 'https://api.bling.com.br/Api/v3/oauth/token';
 
 export function getBlingAccessToken(cfg) {
     const c = cfg || chatDB.getPlatformKv('bling') || {};
@@ -72,7 +74,7 @@ export function buildBlingAuthorizeUrl(clientId, state) {
         client_id: id,
         state: state || `nx_${Date.now()}`,
     });
-    return `https://www.bling.com.br/Api/v3/oauth/authorize?${params.toString()}`;
+    return `${OAUTH_AUTHORIZE}?${params.toString()}`;
 }
 
 export async function exchangeBlingAuthorizationCode({ code, clientId, clientSecret }) {
@@ -83,7 +85,7 @@ export async function exchangeBlingAuthorizationCode({ code, clientId, clientSec
     if (!authCode) throw new Error('Código de autorização ausente.');
 
     const basic = Buffer.from(`${cid}:${secret}`).toString('base64');
-    const res = await fetch('https://www.bling.com.br/Api/v3/oauth/token', {
+    const res = await fetch(OAUTH_TOKEN, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -116,7 +118,7 @@ export async function exchangeBlingAuthorizationCode({ code, clientId, clientSec
 
 export async function refreshBlingAccessToken({ refreshToken, clientId, clientSecret }) {
     const basic = Buffer.from(`${clientId}:${clientSecret}`).toString('base64');
-    const res = await fetch('https://www.bling.com.br/Api/v3/oauth/token', {
+    const res = await fetch(OAUTH_TOKEN, {
         method: 'POST',
         headers: {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -611,12 +613,281 @@ function pickPhone(...candidates) {
     return '';
 }
 
+/** IDs padrão do módulo Vendas (fallback se a API de situações falhar). */
+const DEFAULT_SITUACAO_NOMES = Object.freeze({
+    6: 'Em aberto',
+    9: 'Atendido',
+    12: 'Cancelado',
+    15: 'Em andamento',
+    18: 'Venda Agenciada',
+    21: 'Em digitação',
+    24: 'Verificado',
+});
+
+/**
+ * Contas de teste/dev — nunca entram em métricas do dash (fat, meta, top, etc.).
+ * Nome normalizado (sem acento/caixa) + CPF conhecidos.
+ */
+const DEFAULT_EXCLUDED_SALE_NAMES = Object.freeze([
+    'cristian thiago gomes dos santos',
+]);
+const DEFAULT_EXCLUDED_SALE_DOCS = Object.freeze([
+    '40206558805', // Cristian (dev)
+]);
+
+function normalizePersonName(name) {
+    return String(name || '')
+        .normalize('NFD')
+        .replace(/\p{M}/gu, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function normalizeDocDigits(doc) {
+    return String(doc || '').replace(/\D/g, '');
+}
+
+/** Pedido de conta desenvolvedor / teste — fora das estatísticas. */
+function isExcludedDevSale(order, extraNames = []) {
+    const doc = normalizeDocDigits(order?.contato?.numeroDocumento);
+    if (doc && DEFAULT_EXCLUDED_SALE_DOCS.includes(doc)) return true;
+
+    const n = normalizePersonName(order?.contato?.nome);
+    if (!n) return false;
+    const extras = (Array.isArray(extraNames) ? extraNames : [])
+        .map(normalizePersonName)
+        .filter(Boolean);
+    const list = [...DEFAULT_EXCLUDED_SALE_NAMES, ...extras];
+    return list.some((ex) => {
+        if (!ex) return false;
+        if (n === ex || n.includes(ex) || ex.includes(n)) return true;
+        const tokens = ex.split(' ').filter((t) => t.length > 2);
+        return tokens.length >= 2 && tokens.every((t) => n.includes(t));
+    });
+}
+
+/** Cache id→nome das situações de Pedidos de Venda. */
+let _situacaoCache = { at: 0, byId: new Map(), moduleId: null };
+const SITUACAO_CACHE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Bling na listagem devolve só `{ id, valor }` em situacao — sem nome.
+ * Busca o catálogo em /situacoes/modulos/{idModulo}.
+ */
+export async function ensureBlingSituacaoMap(token) {
+    const now = Date.now();
+    if (_situacaoCache.byId.size && (now - _situacaoCache.at) < SITUACAO_CACHE_MS) {
+        return _situacaoCache.byId;
+    }
+    const t = token || getBlingAccessToken();
+    if (!t) {
+        if (!_situacaoCache.byId.size) {
+            _situacaoCache.byId = new Map(Object.entries(DEFAULT_SITUACAO_NOMES).map(([k, v]) => [String(k), v]));
+        }
+        return _situacaoCache.byId;
+    }
+    try {
+        let moduleId = _situacaoCache.moduleId;
+        if (!moduleId) {
+            const mods = await blingFetch('/situacoes/modulos', t);
+            const list = Array.isArray(mods?.data) ? mods.data : [];
+            const vendas = list.find((m) => /venda/i.test(String(m?.nome || m?.descricao || '')))
+                || list.find((m) => Number(m?.id) === 98310)
+                || list[0];
+            moduleId = vendas?.id != null ? String(vendas.id) : '98310';
+            _situacaoCache.moduleId = moduleId;
+        }
+        const json = await blingFetch(`/situacoes/modulos/${encodeURIComponent(moduleId)}`, t);
+        const rows = Array.isArray(json?.data) ? json.data : [];
+        const byId = new Map(Object.entries(DEFAULT_SITUACAO_NOMES).map(([k, v]) => [String(k), v]));
+        for (const row of rows) {
+            if (row?.id == null) continue;
+            const nome = String(row.nome || row.descricao || '').trim();
+            if (nome) byId.set(String(row.id), nome);
+        }
+        _situacaoCache = { at: now, byId, moduleId };
+        logger.info(`Bling: ${byId.size} situação(ões) de venda carregada(s) (módulo ${moduleId})`);
+        return byId;
+    } catch (err) {
+        logger.warn('Bling: falha ao carregar situações — usando fallback', err?.message || err);
+        if (!_situacaoCache.byId.size) {
+            _situacaoCache.byId = new Map(Object.entries(DEFAULT_SITUACAO_NOMES).map(([k, v]) => [String(k), v]));
+            _situacaoCache.at = now;
+        }
+        return _situacaoCache.byId;
+    }
+}
+
 function situacaoLabel(order) {
     const s = order?.situacao;
-    if (!s) return '';
-    if (typeof s === 'string') return s;
-    if (typeof s === 'object') return s.nome || s.descricao || s.name || '';
+    if (s == null || s === '') return '';
+    if (typeof s === 'string' || typeof s === 'number') {
+        const key = String(s).trim();
+        if (_situacaoCache.byId.has(key)) return _situacaoCache.byId.get(key);
+        if (DEFAULT_SITUACAO_NOMES[key]) return DEFAULT_SITUACAO_NOMES[key];
+        return key;
+    }
+    if (typeof s === 'object') {
+        const named = s.nome || s.descricao || s.name || s.label;
+        if (named) return String(named).trim();
+        const id = s.id != null ? String(s.id) : '';
+        if (id && _situacaoCache.byId.has(id)) return _situacaoCache.byId.get(id);
+        if (id && DEFAULT_SITUACAO_NOMES[id]) return DEFAULT_SITUACAO_NOMES[id];
+        // Sem mapa ainda: evita "Sem status" genérico — mostra id até o cache subir
+        if (id) return `Situação ${id}`;
+    }
     return String(s);
+}
+
+/** Cache de canais de venda Bling (Woo, loja física, etc.). */
+const CANAL_CACHE_MS = 6 * 60 * 60 * 1000;
+let _canalCache = { at: 0, byId: new Map() };
+
+export async function ensureBlingCanalMap(token) {
+    const now = Date.now();
+    if (_canalCache.byId.size && (now - _canalCache.at) < CANAL_CACHE_MS) {
+        return _canalCache.byId;
+    }
+    const t = token || getBlingAccessToken();
+    if (!t) return _canalCache.byId;
+    try {
+        const byId = new Map();
+        for (let page = 1; page <= 5; page += 1) {
+            const json = await blingFetch(`/canais-venda?pagina=${page}&limite=100`, t);
+            const rows = Array.isArray(json?.data) ? json.data : [];
+            for (const row of rows) {
+                if (row?.id == null) continue;
+                byId.set(String(row.id), {
+                    id: String(row.id),
+                    nome: String(row.descricao || row.nome || '').trim() || `Canal ${row.id}`,
+                    tipo: String(row.tipo || '').trim(),
+                });
+            }
+            if (rows.length < 100) break;
+        }
+        _canalCache = { at: now, byId };
+        logger.info(`Bling: ${byId.size} canal(is) de venda carregado(s)`);
+        return byId;
+    } catch (err) {
+        logger.warn('Bling: falha ao carregar canais de venda', err?.message || err);
+        return _canalCache.byId;
+    }
+}
+
+/** Cache de fretePorConta (lista do Bling não traz transporte). */
+const FRETE_CACHE_MS = 6 * 60 * 60 * 1000;
+const _freteCache = new Map(); // orderId -> { fretePorConta, at }
+
+function readFretePorConta(order) {
+    if (order?.transporte?.fretePorConta != null) {
+        return Number(order.transporte.fretePorConta);
+    }
+    if (order?._fretePorConta != null) return Number(order._fretePorConta);
+    const id = order?.id != null ? String(order.id) : '';
+    if (!id) return null;
+    const hit = _freteCache.get(id);
+    if (hit && (Date.now() - hit.at) < FRETE_CACHE_MS) return hit.fretePorConta;
+    return null;
+}
+
+function isLojaFisicaCanal(meta) {
+    const tipo = String(meta?.tipo || '').toLowerCase();
+    const nome = String(meta?.nome || '');
+    return /lojafisica|loja_fisica|fisica/.test(tipo)
+        || /frente\s*de\s*caixa|boutique|quiosque|orion/i.test(nome);
+}
+
+/**
+ * Lista não inclui transporte — busca detalhe só em Loja Física p/ detectar PDV (FC).
+ * No Bling: ícone FC azul ≈ fretePorConta=9; W roxo = Woo; sem ícone = manual.
+ */
+async function enrichLojaFisicaFrete(token, rows) {
+    const pending = [];
+    for (const o of rows) {
+        const lojaId = o?.loja?.id != null ? Number(o.loja.id) : 0;
+        if (!lojaId || !o?.id) continue;
+        const meta = _canalCache.byId.get(String(lojaId));
+        if (!isLojaFisicaCanal(meta)) continue;
+        const id = String(o.id);
+        const hit = _freteCache.get(id);
+        if (hit && (Date.now() - hit.at) < FRETE_CACHE_MS) {
+            o._fretePorConta = hit.fretePorConta;
+            o.transporte = { ...(o.transporte || {}), fretePorConta: hit.fretePorConta };
+            continue;
+        }
+        pending.push(o);
+    }
+    if (!pending.length) return;
+
+    // Sequencial com pausa — Bling rate-limita forte em GET /pedidos/vendas/:id
+    let ok = 0;
+    for (const o of pending) {
+        const id = String(o.id);
+        try {
+            const json = await blingFetch(`/pedidos/vendas/${encodeURIComponent(id)}`, token);
+            const detail = json?.data || json;
+            const frete = detail?.transporte?.fretePorConta != null
+                ? Number(detail.transporte.fretePorConta)
+                : 0;
+            _freteCache.set(id, { fretePorConta: frete, at: Date.now() });
+            o._fretePorConta = frete;
+            o.transporte = { ...(o.transporte || {}), fretePorConta: frete };
+            ok += 1;
+        } catch (err) {
+            logger.warn('Bling canal: falha ao ler frete do pedido', id, err?.message || err);
+            // Não cacheia falha — evita marcar PDV como Manual por 6h
+            o._fretePorConta = null;
+        }
+        await sleep(220);
+    }
+    logger.info(`Bling: frete/PDV enriquecido em ${ok}/${pending.length} pedido(s) de loja física`);
+}
+
+/**
+ * Origem do pedido alinhada aos ícones do Bling:
+ * - W (roxo) → WooCommerce
+ * - FC (azul) → Frente de caixa (PDV; fretePorConta=9)
+ * - sem W/FC → Manual (mesmo se canal Boutique/Orion estiver selecionado)
+ * Outros canais (TikTok, ML…) ficam com label próprio.
+ */
+function resolveOrderChannel(order) {
+    const lojaId = order?.loja?.id != null ? Number(order.loja.id) : 0;
+    const meta = lojaId ? _canalCache.byId.get(String(lojaId)) : null;
+    const tipo = String(meta?.tipo || '').toLowerCase();
+    const nome = meta?.nome || (lojaId ? `Loja ${lojaId}` : 'Pedido manual');
+    const fretePorConta = readFretePorConta(order);
+
+    if (/woocommerce/.test(tipo)) {
+        return { channel: 'woocommerce', channelLabel: 'WooCommerce', channelName: nome };
+    }
+    // Ícone FC do Bling — não confundir com Loja Física / Boutique sem PDV
+    if (fretePorConta === 9) {
+        return { channel: 'frente_caixa', channelLabel: 'Frente de caixa', channelName: nome };
+    }
+    if (!lojaId) {
+        return {
+            channel: 'manual',
+            channelLabel: 'Manual',
+            channelName: 'Pedido manual',
+        };
+    }
+    if (/tiktok/.test(tipo) || (/tiktok/i.test(nome) && !/woocommerce/.test(tipo))) {
+        return { channel: 'tiktok', channelLabel: 'TikTok', channelName: nome };
+    }
+    if (/mercadolivre|mercado_livre/.test(tipo) || /mercado\s*livre/i.test(nome)) {
+        return { channel: 'mercado_livre', channelLabel: 'Mercado Livre', channelName: nome };
+    }
+    // Loja física sem marcador de PDV = lançamento interno (ex.: Adriano #3014)
+    if (isLojaFisicaCanal(meta)) {
+        return { channel: 'manual', channelLabel: 'Manual', channelName: nome };
+    }
+    return {
+        channel: 'outros',
+        channelLabel: nome || 'Outros',
+        channelName: nome || 'Outros',
+    };
 }
 
 function trackingCode(order) {
@@ -928,6 +1199,8 @@ export async function fetchBlingOrdersByPhone(phone, { limit = 8 } = {}) {
     const token = await ensureValidBlingToken();
     if (!token) throw new Error('Bling não conectado ou token expirado.');
 
+    await ensureBlingSituacaoMap(token);
+
     const variants = phoneSearchVariants(digits);
     /** @type {Map<string, string>} id -> nome */
     const matched = new Map();
@@ -1064,6 +1337,461 @@ async function enrichOrdersWithTracking(orders, token, maxFetches = 5) {
     return orders;
 }
 
+function ymdInSaoPaulo(date = new Date()) {
+    return new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+    }).format(date);
+}
+
+function parseBlingMoney(value) {
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    const s = String(value ?? '').trim();
+    if (!s) return 0;
+    if (/,/.test(s) && /\./.test(s)) {
+        return Number(s.replace(/\./g, '').replace(',', '.')) || 0;
+    }
+    if (/,/.test(s)) return Number(s.replace(',', '.')) || 0;
+    return Number(s) || 0;
+}
+
+function orderDateYmd(order) {
+    const raw = String(order?.data || order?.dataSaida || order?.dataPrevista || '').slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : '';
+}
+
+function shiftYmd(ymd, days) {
+    const [y, m, d] = ymd.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() + days);
+    return dt.toISOString().slice(0, 10);
+}
+
+function monthStartYmd(ymd) {
+    return `${ymd.slice(0, 7)}-01`;
+}
+
+/** Mesmo dia no mês anterior (ajusta 31→último dia). */
+function prevMonthSameDay(ymd) {
+    const [y, m, d] = ymd.split('-').map(Number);
+    const prevMonthIndex = m - 2; // 0-based month of previous
+    const lastDay = new Date(Date.UTC(y, m - 1, 0)).getUTCDate();
+    const day = Math.min(d, lastDay);
+    const dt = new Date(Date.UTC(y, prevMonthIndex, day));
+    return dt.toISOString().slice(0, 10);
+}
+
+function daysInMonthYmd(ymd) {
+    const [y, m] = ymd.split('-').map(Number);
+    return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+function dayOfMonthYmd(ymd) {
+    return Number(ymd.slice(8, 10)) || 1;
+}
+
+/** Horas decorridas hoje em America/Sao_Paulo (mín. 0.25). */
+function hoursElapsedSaoPaulo(date = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'America/Sao_Paulo',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    }).formatToParts(date);
+    const hour = Number(parts.find((p) => p.type === 'hour')?.value || 0);
+    const minute = Number(parts.find((p) => p.type === 'minute')?.value || 0);
+    return Math.max(hour + minute / 60, 0.25);
+}
+
+function prevMonthStartYmd(ymd) {
+    return monthStartYmd(shiftYmd(monthStartYmd(ymd), -1));
+}
+
+function emptyBucket() {
+    return { count: 0, revenue: 0, avgTicket: 0 };
+}
+
+function finalizeBucket(b) {
+    return {
+        count: b.count,
+        revenue: Math.round(b.revenue * 100) / 100,
+        avgTicket: b.count ? Math.round((b.revenue / b.count) * 100) / 100 : 0,
+    };
+}
+
+/**
+ * Amostra pedidos (detalhe) e agrega produtos mais vendidos.
+ * Lista do Bling não traz itens — precisa GET /pedidos/vendas/:id.
+ */
+let _topProductsCache = { at: 0, products: [], sampled: 0 };
+
+async function fetchTopProductsSample(token, mapped, { force = false } = {}) {
+    const now = Date.now();
+    if (!force && _topProductsCache.at && (now - _topProductsCache.at) < 10 * 60_000) {
+        return {
+            topProducts: _topProductsCache.products,
+            topProductsSampled: _topProductsCache.sampled,
+        };
+    }
+
+    const candidates = [...mapped]
+        .filter((o) => o.id && o.total > 0 && !/cancel/i.test(String(o.status || '')))
+        .sort((a, b) => (b.total || 0) - (a.total || 0) || String(b.date).localeCompare(String(a.date)))
+        .slice(0, 35);
+
+    const productMap = new Map();
+    let sampled = 0;
+
+    for (const row of candidates) {
+        try {
+            const json = await blingFetch(`/pedidos/vendas/${encodeURIComponent(row.id)}`, token);
+            const order = json?.data || json;
+            if (order?.transporte?.fretePorConta != null && row.id) {
+                _freteCache.set(String(row.id), {
+                    fretePorConta: Number(order.transporte.fretePorConta),
+                    at: Date.now(),
+                });
+            }
+            const itens = Array.isArray(order?.itens) ? order.itens : [];
+            if (!itens.length) continue;
+            sampled += 1;
+            for (const item of itens) {
+                const name = itemDescription(item) || String(item?.codigo || '').trim() || 'Produto';
+                const codigo = String(item?.codigo || item?.produto?.id || '').trim();
+                const key = codigo ? `c:${codigo}` : `n:${name.toLowerCase()}`;
+                const qty = Math.max(0, Number(item?.quantidade) || 0) || 1;
+                const unit = parseBlingMoney(item?.valor);
+                const lineRevenue = qty * unit;
+                const cur = productMap.get(key) || {
+                    name,
+                    codigo: codigo || null,
+                    qty: 0,
+                    revenue: 0,
+                    orders: 0,
+                };
+                cur.qty += qty;
+                cur.revenue += lineRevenue;
+                cur.orders += 1;
+                if (name.length > (cur.name?.length || 0)) cur.name = name;
+                productMap.set(key, cur);
+            }
+        } catch (err) {
+            logger.warn('Bling top produtos: falha no detalhe', row.id, err?.message || err);
+        }
+    }
+
+    const products = [...productMap.values()]
+        .map((p) => ({
+            name: p.name,
+            codigo: p.codigo,
+            qty: Math.round(p.qty * 100) / 100,
+            revenue: Math.round(p.revenue * 100) / 100,
+            orders: p.orders,
+        }))
+        .sort((a, b) => b.revenue - a.revenue || b.qty - a.qty)
+        .slice(0, 10);
+
+    _topProductsCache = { at: now, products, sampled };
+    return { topProducts: products, topProductsSampled: sampled };
+}
+
+/**
+ * Resumo comercial Bling para o Dashboard (hoje, ontem, 7d, 30d, mês).
+ * Cache curto em memória pra não estourar rate limit.
+ */
+let _salesCache = { at: 0, payload: null };
+
+export async function fetchBlingSalesSummary({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && _salesCache.payload && (now - _salesCache.at) < 60_000) {
+        return _salesCache.payload;
+    }
+
+    const emptyPayload = (extra = {}) => ({
+        connected: false,
+        today: emptyBucket(),
+        yesterday: emptyBucket(),
+        last7Days: emptyBucket(),
+        last30Days: emptyBucket(),
+        month: emptyBucket(),
+        prevMonth: emptyBucket(),
+        byStatus: [],
+        byChannel: [],
+        daily: [],
+        recent: [],
+        orders: [],
+        topProducts: [],
+        topProductsSampled: 0,
+        openOrders: 0,
+        goal: null,
+        todayForecast: null,
+        error: null,
+        ...extra,
+    });
+
+    const cfg = chatDB.getPlatformKv('bling') || {};
+    const token = await ensureValidBlingToken(cfg);
+    if (!token) {
+        const empty = emptyPayload({
+            error: 'Bling não conectado. Autorize em Integrações.',
+        });
+        _salesCache = { at: now, payload: empty };
+        return empty;
+    }
+
+    await ensureBlingSituacaoMap(token);
+    await ensureBlingCanalMap(token);
+
+    const today = ymdInSaoPaulo();
+    const yesterday = shiftYmd(today, -1);
+    const start30 = shiftYmd(today, -29);
+    const monthStart = monthStartYmd(today);
+    const prevMonthStart = prevMonthStartYmd(today);
+    const fetchStart = prevMonthStart < start30 ? prevMonthStart : start30;
+
+    const rows = [];
+    try {
+        for (let page = 1; page <= 15; page += 1) {
+            const qs = new URLSearchParams({
+                pagina: String(page),
+                limite: '100',
+                dataInicial: fetchStart,
+                dataFinal: today,
+            });
+            const json = await blingFetch(`/pedidos/vendas?${qs.toString()}`, token);
+            const batch = Array.isArray(json?.data) ? json.data : [];
+            rows.push(...batch);
+            if (batch.length < 100) break;
+        }
+    } catch (err) {
+        logger.warn('Bling sales summary falhou', err?.message || err);
+        const fail = emptyPayload({
+            connected: true,
+            error: err?.message || String(err),
+        });
+        _salesCache = { at: now, payload: fail };
+        return fail;
+    }
+
+    try {
+        const dashCfg = chatDB.getPlatformKv('sales_dashboard') || {};
+        const extraExcludeNames = Array.isArray(dashCfg.excludeContacts)
+            ? dashCfg.excludeContacts
+            : [];
+        const before = rows.length;
+        const kept = rows.filter((o) => !isExcludedDevSale(o, extraExcludeNames));
+        const excludedDevSales = before - kept.length;
+        if (excludedDevSales > 0) {
+            logger.info(`Bling sales: ${excludedDevSales} pedido(s) de conta dev/teste excluído(s) das métricas`);
+            rows.length = 0;
+            rows.push(...kept);
+        }
+    } catch (err) {
+        logger.warn('Bling sales: filtro conta dev falhou', err?.message || err);
+    }
+
+    try {
+        await enrichLojaFisicaFrete(token, rows);
+    } catch (err) {
+        logger.warn('Bling: enriquecimento de origem (FC) falhou', err?.message || err);
+    }
+
+    const todayB = emptyBucket();
+    const yesterdayB = emptyBucket();
+    const weekB = emptyBucket();
+    const month30B = emptyBucket();
+    const monthB = emptyBucket();
+    const prevMonthB = emptyBucket();
+    const statusMap = new Map();
+    const channelMap = new Map();
+    const dailyMap = new Map();
+
+    const weekStart = shiftYmd(today, -6);
+
+    const mapped = rows.map((o) => {
+        const day = orderDateYmd(o);
+        const total = parseBlingMoney(o?.total);
+        const status = situacaoLabel(o) || 'Sem status';
+        const cancelled = /cancel/i.test(status);
+        const { channel, channelLabel, channelName } = resolveOrderChannel(o);
+
+        if (day) {
+            // Cancelados: entram no mapa de status / lista, mas não no faturamento nem tops
+            const add = (b) => { b.count += 1; b.revenue += total; };
+            if (day >= start30) {
+                const st = statusMap.get(status) || emptyBucket();
+                st.count += 1;
+                st.revenue += total;
+                statusMap.set(status, st);
+
+                if (!cancelled) {
+                    add(month30B);
+                    const ch = channelMap.get(channel) || { ...emptyBucket(), channel, channelLabel, channelName };
+                    ch.count += 1;
+                    ch.revenue += total;
+                    channelMap.set(channel, ch);
+                }
+            }
+            if (!cancelled) {
+                if (day >= weekStart) add(weekB);
+                if (day >= monthStart) add(monthB);
+                if (day >= prevMonthStart && day < monthStart) add(prevMonthB);
+                if (day === today) add(todayB);
+                if (day === yesterday) add(yesterdayB);
+
+                const dayB = dailyMap.get(day) || emptyBucket();
+                dayB.count += 1;
+                dayB.revenue += total;
+                dailyMap.set(day, dayB);
+            }
+        }
+
+        return {
+            id: String(o?.id || ''),
+            numero: String(o?.numero || o?.id || ''),
+            contactName: o?.contato?.nome || '',
+            status,
+            channel,
+            channelLabel,
+            channelName,
+            total,
+            totalLabel: formatBrl(total),
+            date: day,
+            cancelled,
+        };
+    });
+
+    // Pedidos da lista do dash: últimos 30d (não misturar mês anterior na tabela)
+    const mapped30 = mapped.filter((o) => o.date && o.date >= start30);
+
+    const recent = [...mapped30]
+        .sort((a, b) => String(b.date).localeCompare(String(a.date)) || Number(b.numero) - Number(a.numero))
+        .slice(0, 12);
+
+    const orders = [...mapped30]
+        .sort((a, b) => String(b.date).localeCompare(String(a.date)) || Number(b.numero) - Number(a.numero));
+
+    const byStatus = [...statusMap.entries()]
+        .map(([status, b]) => ({ status, ...finalizeBucket(b) }))
+        .sort((a, b) => b.revenue - a.revenue);
+
+    const byChannel = [...channelMap.values()]
+        .map((b) => ({
+            channel: b.channel,
+            channelLabel: b.channelLabel,
+            channelName: b.channelName,
+            ...finalizeBucket(b),
+        }))
+        .sort((a, b) => b.revenue - a.revenue);
+
+    const openStatuses = byStatus.filter((s) => /aberto|andamento|digit|etiqueta|aguard/i.test(s.status));
+    const openOrders = openStatuses.reduce((n, s) => n + s.count, 0);
+
+    const daily = [];
+    for (let i = 29; i >= 0; i -= 1) {
+        const day = shiftYmd(today, -i);
+        const b = dailyMap.get(day) || emptyBucket();
+        const prevDay = prevMonthSameDay(day);
+        const prevB = dailyMap.get(prevDay) || emptyBucket();
+        daily.push({
+            date: day,
+            ...finalizeBucket(b),
+            prevRevenue: Math.round((prevB.revenue || 0) * 100) / 100,
+            prevCount: prevB.count || 0,
+            prevDate: prevDay,
+        });
+    }
+
+    const monthFinal = finalizeBucket(monthB);
+    const prevMonthFinal = finalizeBucket(prevMonthB);
+    const todayFinal = finalizeBucket(todayB);
+
+    const dashCfg = chatDB.getPlatformKv('sales_dashboard') || {};
+    const monthlyGoal = Math.max(0, Number(dashCfg.monthlyGoal) || 0);
+    const dim = daysInMonthYmd(today);
+    const dom = dayOfMonthYmd(today);
+    const daysRemaining = Math.max(dim - dom, 0);
+    const expectedPct = dim ? (dom / dim) * 100 : 0;
+    const expectedRevenue = monthlyGoal ? (monthlyGoal * dom) / dim : 0;
+    const achievedPct = monthlyGoal ? (monthFinal.revenue / monthlyGoal) * 100 : 0;
+    const goal = monthlyGoal > 0 ? {
+        monthlyGoal,
+        achieved: monthFinal.revenue,
+        achievedPct: Math.round(achievedPct * 10) / 10,
+        expectedPct: Math.round(expectedPct * 10) / 10,
+        expectedRevenue: Math.round(expectedRevenue * 100) / 100,
+        gapVsExpected: Math.round((monthFinal.revenue - expectedRevenue) * 100) / 100,
+        gapVsGoal: Math.round((monthFinal.revenue - monthlyGoal) * 100) / 100,
+        pacePerDay: daysRemaining > 0
+            ? Math.round(Math.max(0, monthlyGoal - monthFinal.revenue) / daysRemaining * 100) / 100
+            : 0,
+        daysRemaining,
+        dayOfMonth: dom,
+        daysInMonth: dim,
+    } : {
+        monthlyGoal: 0,
+        achieved: monthFinal.revenue,
+        achievedPct: 0,
+        expectedPct: Math.round(expectedPct * 10) / 10,
+        expectedRevenue: 0,
+        gapVsExpected: 0,
+        gapVsGoal: 0,
+        pacePerDay: 0,
+        daysRemaining,
+        dayOfMonth: dom,
+        daysInMonth: dim,
+    };
+
+    const hoursElapsed = hoursElapsedSaoPaulo();
+    const todayForecast = {
+        soFar: todayFinal.revenue,
+        count: todayFinal.count,
+        hoursElapsed: Math.round(hoursElapsed * 100) / 100,
+        forecast: Math.round((todayFinal.revenue / hoursElapsed) * 24 * 100) / 100,
+        vsYesterdayPct: yesterdayB.revenue > 0
+            ? Math.round(((todayFinal.revenue - yesterdayB.revenue) / yesterdayB.revenue) * 1000) / 10
+            : null,
+    };
+
+    // Top produtos: só pedidos não cancelados dos últimos 30d
+    const mapped30Active = mapped30.filter((o) => !o.cancelled && !/cancel/i.test(String(o.status || '')));
+
+    let topProducts = [];
+    let topProductsSampled = 0;
+    try {
+        const tops = await fetchTopProductsSample(token, mapped30Active, { force });
+        topProducts = tops.topProducts || [];
+        topProductsSampled = tops.topProductsSampled || 0;
+    } catch (err) {
+        logger.warn('Bling top produtos falhou', err?.message || err);
+    }
+
+    const payload = {
+        connected: true,
+        today: todayFinal,
+        yesterday: finalizeBucket(yesterdayB),
+        last7Days: finalizeBucket(weekB),
+        last30Days: finalizeBucket(month30B),
+        month: monthFinal,
+        prevMonth: prevMonthFinal,
+        byStatus,
+        byChannel,
+        daily,
+        recent,
+        orders,
+        topProducts,
+        topProductsSampled,
+        openOrders,
+        goal,
+        todayForecast,
+        error: null,
+        fetchedAt: now,
+    };
+    _salesCache = { at: now, payload };
+    return payload;
+}
 
 export default {
     getBlingAccessToken,
@@ -1092,5 +1820,8 @@ export default {
     interpolateBlingMessage,
     resolveBlingMessage,
     enrichBlingFromApi,
+    fetchBlingSalesSummary,
+    ensureBlingSituacaoMap,
+    ensureBlingCanalMap,
     isBlingOrderEvent,
 };

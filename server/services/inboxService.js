@@ -333,31 +333,37 @@ export async function persistInboxMessage(msg, opts = {}) {
         mediaType,
         mediaFile: mediaInfo?.mediaFile || null,
         mimetype: mediaInfo?.mimetype || null,
+        channel: opts.channel === 'ecommerce' ? 'ecommerce' : 'dispatch',
     }, opts);
 
     if (saved) {
         logger.info('Inbox: mensagem registrada', {
             from: msg.fromMe ? 'eu' : `${phone.slice(0, 6)}…`,
             preview: body.slice(0, 40),
+            channel: opts.channel === 'ecommerce' ? 'ecommerce' : 'dispatch',
         });
 
         if (!msg.fromMe && !opts.silent) {
             const isNewContact = chatDB.countInboundMessages(peerJid) === 1;
+            const channel = opts.channel === 'ecommerce' ? 'ecommerce' : 'dispatch';
 
-            import('./followUpEngine.js').then(({ handleInboundMessage }) => {
-                handleInboundMessage({ chatId: peerJid, phone, contactName, body, isNewContact });
-            }).catch((err) => {
-                logger.warn('Inbox: falha ao processar follow ups', err?.message || err);
-            });
+            // Follow-ups / fluxos de loja só no canal e-commerce
+            if (channel === 'ecommerce') {
+                import('./followUpEngine.js').then(({ handleInboundMessage }) => {
+                    handleInboundMessage({ chatId: peerJid, phone, contactName, body, isNewContact });
+                }).catch((err) => {
+                    logger.warn('Inbox: falha ao processar follow ups', err?.message || err);
+                });
 
-            import('./flowEngine.js').then(({ handleInboundMessageForFlows }) => {
-                handleInboundMessageForFlows({ chatId: peerJid, phone, contactName, body, isNewContact });
-            }).catch((err) => {
-                logger.warn('Inbox: falha ao processar fluxos', err?.message || err);
-            });
+                import('./flowEngine.js').then(({ handleInboundMessageForFlows }) => {
+                    handleInboundMessageForFlows({ chatId: peerJid, phone, contactName, body, isNewContact });
+                }).catch((err) => {
+                    logger.warn('Inbox: falha ao processar fluxos', err?.message || err);
+                });
+            }
 
             import('./attendanceService.js').then(({ scheduleAgentReply }) => {
-                scheduleAgentReply({ chatId: peerJid, phone, contactName, body });
+                scheduleAgentReply({ chatId: peerJid, phone, contactName, body, channel });
             }).catch((err) => {
                 logger.warn('Inbox: falha ao agendar atendimento', err?.message || err);
             });
@@ -512,7 +518,7 @@ export async function syncRecentInbox(client, {
                 _getChatId: () => row.chatId,
                 client, // permite resolver @lid → telefone no sync
             };
-            const wasNew = await persistInboxMessage(fakeMsg, { silent: true });
+            const wasNew = await persistInboxMessage(fakeMsg, { silent: true, channel: 'dispatch' });
             if (wasNew) synced += 1;
 
             if (
@@ -533,6 +539,7 @@ export async function syncRecentInbox(client, {
                         })(),
                         contactName: row.notifyName || '',
                         body: String(row.body || '').trim(),
+                        channel: 'dispatch',
                     });
                 }
             }
@@ -742,7 +749,7 @@ export async function refreshInboxAvatars(client) {
 
 /**
  * Persiste mensagem inbound/outbound da Cloud API Meta (e-commerce).
- * chatId padronizado: {digits}@c.us
+ * chatId padronizado: meta:{digits}@c.us (evita colidir com inbox do Disparo)
  */
 export async function persistMetaInboxMessage({
     id,
@@ -756,7 +763,8 @@ export async function persistMetaInboxMessage({
 } = {}) {
     const digits = String(phone || '').replace(/\D/g, '');
     if (!digits || digits.length < 10) return false;
-    const chatId = `${digits}@c.us`;
+    const { metaChatIdFromPhone } = await import('./inboxOutbound.js');
+    const chatId = metaChatIdFromPhone(digits);
     const text = String(body || '').trim();
     if (!text && !mediaType) return false;
 
@@ -772,6 +780,7 @@ export async function persistMetaInboxMessage({
         mediaType: mediaType || null,
         mediaFile: null,
         mimetype: null,
+        channel: 'ecommerce',
     }, { silent });
 
     if (saved && !fromMe && !silent) {
@@ -795,7 +804,7 @@ export async function persistMetaInboxMessage({
         });
 
         import('./attendanceService.js').then(({ scheduleAgentReply }) => {
-            scheduleAgentReply({ chatId, phone: digits, contactName, body: text });
+            scheduleAgentReply({ chatId, phone: digits, contactName, body: text, channel: 'ecommerce' });
         }).catch((err) => {
             logger.warn('Inbox: falha agente (Meta)', err?.message || err);
         });

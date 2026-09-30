@@ -1,6 +1,6 @@
 import { BRANDING } from './branding.js';
 
-/** Template fixo da Palavra do Dia — Nexo Dev. */
+/** Template fixo da Palavra do Dia (links/assinatura via env + branding). */
 
 const SUPER_DIGITS = '⁰¹²³⁴⁵⁶⁷⁸⁹';
 
@@ -68,13 +68,30 @@ export function getPalavraDoDiaDefaults() {
     return {
         linkPalavra: process.env.PDD_LINK_PALAVRA || 'https://youtu.be/fAY3SsWO394',
         linkMinisterio: process.env.PDD_LINK_MINISTERIO || process.env.PDD_LINK_VIRGINIA || 'https://youtu.be/HplnvYBErP8',
-        linkMusica: process.env.PDD_LINK_MUSICA || 'https://youtu.be/example',
-        linkCulto: process.env.PDD_LINK_CULTO || 'https://www.youtube.com/live/Nh_8r-ZtRuk?si=i5y6f2DFKiR2fEey',
+        linkMusica: process.env.PDD_LINK_MUSICA || 'https://onerpm.link/SegurancaeRefugio_VirginiaArruda',
+        musicaTitulo: process.env.PDD_MUSICA_TITULO || 'Segurança e Refúgio',
+        // Vazio = só o aviso, sem linha ▶️ (formato oficial atual)
+        linkCulto: process.env.PDD_LINK_CULTO || '',
         cultoTexto: process.env.PDD_CULTO_TEXTO || ''
     };
 }
 
-/** Monta a mensagem completa no padrão Nexo. */
+function buildCultoBlock(links) {
+    const link = String(links.linkCulto || '').trim();
+    const quando = String(links.cultoTexto || '').trim();
+    if (quando && link) {
+        return `📢 Não perca nosso culto online!\n🗓️ ${quando}\n▶️ ${link}`;
+    }
+    if (quando) {
+        return `📢 Não perca nosso culto online!\n🗓️ ${quando}`;
+    }
+    if (link) {
+        return `📢 Não perca nosso culto online!\n▶️ ${link}`;
+    }
+    return '📢 Não perca nosso culto online!';
+}
+
+/** Monta a mensagem completa no padrão oficial. */
 export function renderPalavraDoDia({
     dataExtenso,
     verseNumber,
@@ -85,9 +102,10 @@ export function renderPalavraDoDia({
     links = getPalavraDoDiaDefaults()
 }) {
     const superscript = verseToSuperscript(verseNumber);
-    const cultoBlock = links.cultoTexto
-        ? `📢 Não perca nosso culto online!\n🗓️ ${links.cultoTexto}\n▶️ ${links.linkCulto}`
-        : `📢 Não perca nosso culto online!\n▶️ ${links.linkCulto}`;
+    const musicTitle = String(links.musicaTitulo || '').trim();
+    const musicLine = musicTitle
+        ? `💿 Ouça agora "${musicTitle}": ${links.linkMusica}`
+        : `💿 Ouça agora: ${links.linkMusica}`;
 
     return [
         '✨ A PALAVRA DO DIA',
@@ -102,9 +120,9 @@ export function renderPalavraDoDia({
         '',
         `📡 Palavra do Dia: ${links.linkPalavra}`,
         `🎶 ${BRANDING.productName}: ${links.linkMinisterio}`,
-        `💿 Ouça agora: ${links.linkMusica}`,
+        musicLine,
         '',
-        cultoBlock,
+        buildCultoBlock(links),
         '',
         '🐣 Mim ❤️ Você ❤️',
         `✍️ ${BRANDING.tenantName}`

@@ -24,13 +24,13 @@ const SEED_FOLLOWUPS = [
 const SEED_AGENTS = [
     {
         id: 'ag_1',
-        name: 'Assistente Pastoral',
-        description: 'Tom acolhedor para dúvidas sobre cultos e ministério.',
+        name: 'Assistente da Bispa',
+        description: 'Agente virtual amorosa da Bispa Virgínia Arruda — oração, cultos, redes e dízimo.',
         type: 'Atendimento',
         active: true,
         prompt: PASTORAL_AGENT_PROMPT,
         audio: true,
-        files: false,
+        files: true,
         connection: 'WhatsApp Web',
         createdAt: Date.now() - 86400000 * 5,
     },
@@ -115,17 +115,24 @@ function seedEntities(type, items) {
 }
 
 function upgradeWeakAgentPrompts() {
-    const weakPattern = /^(assistente pastoral|você é .+, assistente|faq sobre)/i;
+    const pastoralMarker = 'assistente virtual da Bispa Virgínia Arruda';
     chatDB.listPlatformEntities('agents').forEach((ag) => {
+        const isSales = ag.type === 'Vendas' || /venda|loja|semijoia/i.test(ag.name || '');
+        const isFaq = ag.type === 'FAQ';
+        if (isSales || isFaq) return;
+
         const p = String(ag.prompt || '').trim();
-        const weak = !p || p.length < 120 || weakPattern.test(p);
-        if (!weak) return;
-        const prompt = ag.type === 'Vendas'
-            ? undefined
-            : ag.type === 'FAQ'
-                ? undefined
-                : PASTORAL_AGENT_PROMPT;
-        if (prompt) chatDB.savePlatformEntity('agents', { ...ag, prompt });
+        const needsUpgrade = !p || p.length < 200 || !p.includes(pastoralMarker);
+        if (!needsUpgrade) return;
+
+        chatDB.savePlatformEntity('agents', {
+            ...ag,
+            name: ag.name?.includes('Bispa') ? ag.name : 'Assistente da Bispa',
+            description: 'Agente virtual amorosa da Bispa Virgínia Arruda — oração, cultos, redes e dízimo.',
+            prompt: PASTORAL_AGENT_PROMPT,
+            files: true,
+            active: ag.id === 'ag_1' ? true : ag.active,
+        });
     });
 }
 

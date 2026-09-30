@@ -5,6 +5,7 @@ import { useToast } from '../contexts/ToastContext';
 import InboxPanel from './InboxPanel';
 
 export type CrmTab = 'atendimento' | 'pipeline';
+export type CrmChannel = 'dispatch' | 'ecommerce';
 
 const STAGES: { id: CrmDealStage; label: string }[] = [
   { id: 'new', label: 'Novo contato' },
@@ -30,11 +31,12 @@ function normalizeStage(stage: string): CrmDealStage {
 }
 
 type CrmViewProps = {
+  channel?: CrmChannel;
   tab?: CrmTab;
   onTabChange?: (tab: CrmTab) => void;
 };
 
-const PipelineBoard: React.FC = () => {
+const PipelineBoard: React.FC<{ channel: CrmChannel }> = ({ channel }) => {
   const { showToast } = useToast();
   const [deals, setDeals] = useState<CrmDeal[]>([]);
   const [loading, setLoading] = useState(true);
@@ -43,7 +45,7 @@ const PipelineBoard: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await platformService.listCrmDeals();
+      const res = await platformService.listCrmDeals(channel);
       setDeals((res.deals || []).map((d) => ({
         ...d,
         stage: normalizeStage(d.stage),
@@ -55,7 +57,7 @@ const PipelineBoard: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [showToast]);
+  }, [showToast, channel]);
 
   useEffect(() => {
     void refresh();
@@ -93,7 +95,7 @@ const PipelineBoard: React.FC = () => {
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-xs text-bs-muted max-w-2xl">
-          Funil digital: do WhatsApp até o pagamento. Use <strong className="text-bs-text">+ Criar</strong> na ficha do cliente no Atendimento.
+          Funil digital da loja: do WhatsApp até o pagamento. Use <strong className="text-bs-text">+ Criar</strong> na ficha do cliente no Atendimento.
         </p>
         <button type="button" className="bs-btn-secondary text-xs py-1.5 px-3" onClick={() => void refresh()}>
           Atualizar
@@ -118,35 +120,36 @@ const PipelineBoard: React.FC = () => {
                     <p className="text-[11px] text-bs-muted truncate">{d.contactName}</p>
                     {d.phone && <p className="text-[10px] font-mono text-bs-subtle truncate">{d.phone}</p>}
                     {d.value > 0 && (
-                      <p className="text-[11px] text-bs-accent font-bold">R$ {Number(d.value).toFixed(2)}</p>
+                      <p className="text-[11px] font-semibold text-bs-accent">
+                        R$ {Number(d.value).toLocaleString('pt-BR', { minimumFractionDigits: 0 })}
+                      </p>
                     )}
                     <div className="flex gap-1 pt-1">
                       {prev && (
                         <button
                           type="button"
-                          className="text-[10px] px-1.5 py-0.5 rounded border border-bs-border text-bs-muted hover:text-bs-text disabled:opacity-50"
                           disabled={busyId === d.id}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-bs-shell text-bs-muted hover:text-bs-text"
                           onClick={() => void moveDeal(d, prev.id)}
-                          title={`Voltar para ${prev.label}`}
                         >
                           ←
                         </button>
                       )}
-                      {next && next.id !== 'lost' && (
+                      {next && (
                         <button
                           type="button"
-                          className="flex-1 text-[10px] px-1.5 py-0.5 rounded bg-bs-accent/15 text-bs-accent font-semibold disabled:opacity-50"
                           disabled={busyId === d.id}
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-bs-shell text-bs-muted hover:text-bs-text"
                           onClick={() => void moveDeal(d, next.id)}
                         >
-                          Avançar
+                          →
                         </button>
                       )}
-                      {stage.id !== 'lost' && stage.id !== 'paid' && (
+                      {stage.id !== 'lost' && (
                         <button
                           type="button"
-                          className="text-[10px] px-1.5 py-0.5 rounded border border-bs-border text-bs-muted hover:text-rose-600 disabled:opacity-50"
                           disabled={busyId === d.id}
+                          className="ml-auto text-[10px] px-1.5 py-0.5 rounded text-rose-600 hover:bg-rose-500/10"
                           onClick={() => void moveDeal(d, 'lost')}
                           title="Marcar como perdido"
                         >
@@ -168,7 +171,25 @@ const PipelineBoard: React.FC = () => {
   );
 };
 
-const CrmView: React.FC<CrmViewProps> = ({ tab: controlledTab, onTabChange }) => {
+const META: Record<CrmChannel, { title: string; desc: string; showPipeline: boolean }> = {
+  dispatch: {
+    title: 'CRM Palavra',
+    desc: 'Atendimento no WhatsApp de disparo — dúvidas sobre a Bispa, cultos e Palavra do Dia.',
+    showPipeline: false,
+  },
+  ecommerce: {
+    title: 'CRM Loja',
+    desc: 'Atendimento e-commerce (Cloud API Meta) — venda assistida e funil até o pagamento.',
+    showPipeline: true,
+  },
+};
+
+const CrmView: React.FC<CrmViewProps> = ({
+  channel = 'ecommerce',
+  tab: controlledTab,
+  onTabChange,
+}) => {
+  const meta = META[channel] || META.ecommerce;
   const [localTab, setLocalTab] = useState<CrmTab>('atendimento');
   const tab = controlledTab ?? localTab;
   const setTab = (next: CrmTab) => {
@@ -176,40 +197,46 @@ const CrmView: React.FC<CrmViewProps> = ({ tab: controlledTab, onTabChange }) =>
     if (controlledTab === undefined) setLocalTab(next);
   };
 
+  useEffect(() => {
+    if (!meta.showPipeline && tab === 'pipeline') setTab('atendimento');
+  }, [meta.showPipeline, tab]);
+
   return (
     <div className="space-y-4 animate-fadeIn">
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
         <div>
-          <h2 className="bs-page-title">CRM</h2>
-          <p className="bs-page-desc mt-1">
-            E-commerce + WhatsApp — ajude quem não sabe comprar no site e acompanhe o funil digital.
-          </p>
+          <h2 className="bs-page-title">{meta.title}</h2>
+          <p className="bs-page-desc mt-1">{meta.desc}</p>
         </div>
-        <div className="flex gap-1 p-1 rounded-lg bg-bs-elevated border border-bs-border self-start">
-          <button
-            type="button"
-            onClick={() => setTab('atendimento')}
-            className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
-              tab === 'atendimento' ? 'bg-bs-shell text-bs-text shadow-sm' : 'text-bs-muted hover:text-bs-text'
-            }`}
-          >
-            <i className="fa-solid fa-comments mr-1.5" />
-            Atendimento
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab('pipeline')}
-            className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
-              tab === 'pipeline' ? 'bg-bs-shell text-bs-text shadow-sm' : 'text-bs-muted hover:text-bs-text'
-            }`}
-          >
-            <i className="fa-solid fa-chart-line mr-1.5" />
-            Pipeline
-          </button>
-        </div>
+        {meta.showPipeline && (
+          <div className="flex gap-1 p-1 rounded-lg bg-bs-elevated border border-bs-border self-start">
+            <button
+              type="button"
+              onClick={() => setTab('atendimento')}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
+                tab === 'atendimento' ? 'bg-bs-shell text-bs-text shadow-sm' : 'text-bs-muted hover:text-bs-text'
+              }`}
+            >
+              <i className="fa-solid fa-comments mr-1.5" />
+              Atendimento
+            </button>
+            <button
+              type="button"
+              onClick={() => setTab('pipeline')}
+              className={`text-xs font-semibold px-3 py-1.5 rounded-md transition-colors ${
+                tab === 'pipeline' ? 'bg-bs-shell text-bs-text shadow-sm' : 'text-bs-muted hover:text-bs-text'
+              }`}
+            >
+              <i className="fa-solid fa-chart-line mr-1.5" />
+              Pipeline
+            </button>
+          </div>
+        )}
       </div>
 
-      {tab === 'atendimento' ? <InboxPanel embedded /> : <PipelineBoard />}
+      {tab === 'pipeline' && meta.showPipeline
+        ? <PipelineBoard channel={channel} />
+        : <InboxPanel embedded channel={channel} />}
     </div>
   );
 };

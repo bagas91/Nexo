@@ -457,6 +457,7 @@ try {
 for (const col of [
     'ALTER TABLE inbox_conversations ADD COLUMN avatarFile TEXT',
     'ALTER TABLE inbox_conversations ADD COLUMN avatarUpdatedAt INTEGER',
+    "ALTER TABLE inbox_conversations ADD COLUMN channel TEXT NOT NULL DEFAULT 'dispatch'",
     'ALTER TABLE inbox_messages ADD COLUMN mediaType TEXT',
     'ALTER TABLE inbox_messages ADD COLUMN mediaFile TEXT',
     'ALTER TABLE inbox_messages ADD COLUMN mimetype TEXT',
@@ -527,6 +528,37 @@ class ChatDatabase {
         this.clearAllDispatches();
         this.clearAllCategories();
         return { scheduleIds: ids };
+    }
+
+    /**
+     * Apaga conversas + mensagens do inbox de um canal (dispatch | ecommerce).
+     * @returns {{ conversations: number, messages: number }}
+     */
+    clearInboxByChannel(channel) {
+        const ch = channel === 'ecommerce' ? 'ecommerce' : 'dispatch';
+        const convRows = db.prepare(`
+            SELECT chatId FROM inbox_conversations
+            WHERE (
+                CASE
+                    WHEN channel = 'ecommerce' OR chatId LIKE 'meta:%' THEN 'ecommerce'
+                    ELSE 'dispatch'
+                END
+            ) = ?
+        `).all(ch);
+        const chatIds = convRows.map((r) => r.chatId).filter(Boolean);
+        if (!chatIds.length) return { conversations: 0, messages: 0 };
+
+        const delMsg = db.prepare('DELETE FROM inbox_messages WHERE chatId = ?');
+        const delConv = db.prepare('DELETE FROM inbox_conversations WHERE chatId = ?');
+        let messages = 0;
+        const tx = db.transaction((ids) => {
+            for (const id of ids) {
+                messages += delMsg.run(id).changes;
+                delConv.run(id);
+            }
+        });
+        tx(chatIds);
+        return { conversations: chatIds.length, messages };
     }
 
     saveHistoryEntry(entry) {
@@ -1134,6 +1166,7 @@ class ChatDatabase {
         const mediaType = msg.mediaType ? String(msg.mediaType) : null;
         const mediaFile = msg.mediaFile ? String(msg.mediaFile) : null;
         const mimetype = msg.mimetype ? String(msg.mimetype) : null;
+        const channel = msg.channel === 'ecommerce' ? 'ecommerce' : 'dispatch';
 
         const stmt = db.prepare(`
             INSERT INTO inbox_messages (id, chatId, phone, contactName, body, fromMe, ts, seen, mediaType, mediaFile, mimetype)
@@ -1159,8 +1192,8 @@ class ChatDatabase {
         let unread = existing?.unread || 0;
         if (!msg.fromMe && !silent) unread += 1;
         db.prepare(`
-            INSERT INTO inbox_conversations (chatId, phone, contactName, lastMessage, lastTs, unread, status)
-            VALUES (?, ?, ?, ?, ?, ?, 'open')
+            INSERT INTO inbox_conversations (chatId, phone, contactName, lastMessage, lastTs, unread, status, channel)
+            VALUES (?, ?, ?, ?, ?, ?, 'open', ?)
             ON CONFLICT(chatId) DO UPDATE SET
                 phone = CASE
                     WHEN length(excluded.phone) BETWEEN 10 AND 13 THEN excluded.phone
@@ -1175,12 +1208,16 @@ class ChatDatabase {
                 lastMessage = excluded.lastMessage,
                 lastTs = excluded.lastTs,
                 unread = excluded.unread,
+                channel = COALESCE(excluded.channel, inbox_conversations.channel),
                 humanAlertAt = CASE WHEN ? = 1 THEN NULL ELSE inbox_conversations.humanAlertAt END,
                 status = CASE
                     WHEN ? = 0 AND inbox_conversations.status = 'closed' THEN 'open'
                     ELSE inbox_conversations.status
                 END
-        `).run(chatId, phone, contactName, body, ts, unread, msg.fromMe ? 1 : 0, msg.fromMe ? 1 : 0, msg.fromMe ? 1 : 0);
+        `).run(
+            chatId, phone, contactName, body, ts, unread, channel,
+            msg.fromMe ? 1 : 0, msg.fromMe ? 1 : 0, msg.fromMe ? 1 : 0
+        );
         return true;
     }
 
@@ -1207,16 +1244,35 @@ class ChatDatabase {
         return Array.isArray(match?.tags) ? match.tags.filter(Boolean) : [];
     }
 
-    listInboxConversations(limit = 100) {
+    listInboxConversations(limit = 100, opts = {}) {
         const contacts = this.listPlatformEntities('contacts');
-        return db.prepare(`
-            SELECT chatId, phone, contactName, lastMessage, lastTs AS updatedAt, unread, status, mode,
-                avatarFile, humanAlertAt, notes,
-                (SELECT fromMe FROM inbox_messages m WHERE m.chatId = inbox_conversations.chatId ORDER BY ts DESC LIMIT 1) AS lastFromMe
-            FROM inbox_conversations
-            ORDER BY lastTs DESC
-            LIMIT ?
-        `).all(limit).map((row) => {
+        const channelFilter = opts.channel === 'ecommerce' || opts.channel === 'dispatch'
+            ? opts.channel
+            : null;
+        const rows = channelFilter
+            ? db.prepare(`
+                SELECT chatId, phone, contactName, lastMessage, lastTs AS updatedAt, unread, status, mode,
+                    avatarFile, humanAlertAt, notes, channel,
+                    (SELECT fromMe FROM inbox_messages m WHERE m.chatId = inbox_conversations.chatId ORDER BY ts DESC LIMIT 1) AS lastFromMe
+                FROM inbox_conversations
+                WHERE (
+                    CASE
+                        WHEN channel = 'ecommerce' OR chatId LIKE 'meta:%' THEN 'ecommerce'
+                        ELSE 'dispatch'
+                    END
+                ) = ?
+                ORDER BY lastTs DESC
+                LIMIT ?
+            `).all(channelFilter, limit)
+            : db.prepare(`
+                SELECT chatId, phone, contactName, lastMessage, lastTs AS updatedAt, unread, status, mode,
+                    avatarFile, humanAlertAt, notes, channel,
+                    (SELECT fromMe FROM inbox_messages m WHERE m.chatId = inbox_conversations.chatId ORDER BY ts DESC LIMIT 1) AS lastFromMe
+                FROM inbox_conversations
+                ORDER BY lastTs DESC
+                LIMIT ?
+            `).all(limit);
+        return rows.map((row) => {
             const conv = this.mapInboxConversation(row);
             if (conv) conv.tags = this._tagsForInboxPhone(conv.phone, contacts);
             return conv;
@@ -1236,6 +1292,9 @@ class ChatDatabase {
         if (!displayName || (phoneDigits && displayName.replace(/\D/g, '') === phoneDigits)) {
             displayName = phoneDigits || rawName || 'Cliente';
         }
+        const channel = row.channel === 'ecommerce' || String(row.chatId || '').startsWith('meta:')
+            ? 'ecommerce'
+            : 'dispatch';
         return {
             id: row.chatId || row.id,
             contactName: displayName,
@@ -1244,6 +1303,7 @@ class ChatDatabase {
             unread,
             status,
             mode: row.mode || 'bot',
+            channel,
             updatedAt: row.updatedAt || row.lastTs,
             avatarUrl: row.avatarFile ? `/api/inbox/avatars/${encodeURIComponent(row.avatarFile)}` : null,
             humanAlertAt,
@@ -1357,7 +1417,7 @@ class ChatDatabase {
         const olderThan = Date.now() - idleMs;
         const newerThan = olderThan - lookMs;
         const rows = db.prepare(`
-            SELECT c.chatId, c.phone, c.contactName, c.lastMessage, c.lastTs, c.mode, c.status, c.humanAlertAt,
+            SELECT c.chatId, c.phone, c.contactName, c.lastMessage, c.lastTs, c.mode, c.status, c.humanAlertAt, c.channel,
                 (SELECT fromMe FROM inbox_messages m WHERE m.chatId = c.chatId ORDER BY ts DESC LIMIT 1) AS lastFromMe
             FROM inbox_conversations c
             WHERE c.lastTs <= ?
@@ -1375,6 +1435,9 @@ class ChatDatabase {
             contactName: r.contactName,
             lastMessage: r.lastMessage,
             lastTs: r.lastTs,
+            channel: r.channel === 'ecommerce' || String(r.chatId || '').startsWith('meta:')
+                ? 'ecommerce'
+                : 'dispatch',
             waitMinutes: Math.round((Date.now() - r.lastTs) / 60000),
         }));
     }

@@ -120,17 +120,27 @@ export function getCrmProfile(phone, { name } = {}) {
     return { contact, deals, phoneUnresolved: !phoneOk };
 }
 
-export function listDealsByPhone(phone) {
+export function listDealsByPhone(phone, channel = null) {
     const digits = phoneDigits(phone);
     return chatDB.listPlatformEntities('deals')
         .map((d) => ({ ...d, stage: normalizeDealStage(d.stage) }))
-        .filter((d) => phonesMatch(d.phone, digits) || (!d.phone && false))
+        .filter((d) => phonesMatch(d.phone, digits))
+        .filter((d) => {
+            if (!channel) return true;
+            const ch = d.channel === 'dispatch' ? 'dispatch' : 'ecommerce';
+            return ch === channel;
+        })
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
-export function listCrmDeals() {
+export function listCrmDeals(channel = null) {
     return chatDB.listPlatformEntities('deals')
-        .map((d) => ({ ...d, stage: normalizeDealStage(d.stage) }))
+        .map((d) => ({
+            ...d,
+            stage: normalizeDealStage(d.stage),
+            channel: d.channel === 'dispatch' ? 'dispatch' : 'ecommerce',
+        }))
+        .filter((d) => (channel ? d.channel === channel : true))
         .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 }
 
@@ -143,6 +153,7 @@ export function createCrmDeal({
     source = 'whatsapp',
     conversationId,
     notes,
+    channel = 'ecommerce',
 } = {}) {
     const digits = phoneDigits(phone);
     if (digits.length < 10) throw new Error('Telefone do cliente é obrigatório.');
@@ -153,6 +164,7 @@ export function createCrmDeal({
         needsHelp: true,
     });
     const now = Date.now();
+    const dealChannel = channel === 'dispatch' ? 'dispatch' : 'ecommerce';
     const deal = {
         id: `deal_${now.toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
         title: String(title || `Venda assistida — ${contact.name}`).trim(),
@@ -163,6 +175,7 @@ export function createCrmDeal({
         stage: normalizeDealStage(stage),
         value: Number(value) || 0,
         source: source || 'whatsapp',
+        channel: dealChannel,
         notes: String(notes || ''),
         createdAt: now,
         updatedAt: now,

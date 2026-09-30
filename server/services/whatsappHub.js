@@ -16,7 +16,8 @@ export { WA_ROLES, WA_ROLE_META, resolveSessionDir };
 export const dispatchClient = new WhatsAppClient({
     role: WA_ROLES.DISPATCH,
     clientId: null,
-    enableInbox: false,
+    // Inbox pastoral: dúvidas sobre Bispa / Palavra do Dia no número de disparo
+    enableInbox: true,
     clearChatsOnQr: true,
     enableGroupSync: true,
 });

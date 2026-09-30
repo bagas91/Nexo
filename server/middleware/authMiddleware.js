@@ -4,7 +4,7 @@
  */
 
 import { verifyToken, extractBearer } from '../utils/auth.js';
-import { resolveApiModule, userHasModule, userHasAnyAppModule } from '../config/modules.js';
+import { resolveApiModule, userHasModule, userHasAnyOfModules, userHasAnyAppModule } from '../config/modules.js';
 import chatDB from '../db/database.js';
 
 const API_KEY = process.env.API_KEY;
@@ -94,7 +94,7 @@ export function authenticate(req, res, next) {
         return next();
     }
 
-    if (!userHasModule(user, needed)) {
+    if (!userHasAnyOfModules(user, needed)) {
         return res.status(403).json({ error: `Sem permissão para o módulo "${needed}".` });
     }
 

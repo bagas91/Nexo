@@ -24,7 +24,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PUPPETEER_CACHE_DIR: '/root/.cache/puppeteer',
-        PUPPETEER_EXECUTABLE_PATH: '/root/.cache/puppeteer/chrome/linux-145.0.7632.46/chrome-linux64/chrome',
+        PUPPETEER_EXECUTABLE_PATH: '/root/.cache/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome',
       },
       // Prefixo data/hora em cada linha nos logs do PM2 (~/.pm2/logs e `pm2 logs`).
       // Formato moment.js: https://pm2.keymetrics.io/docs/usage/application-declaration/

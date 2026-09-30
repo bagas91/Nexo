@@ -40,10 +40,10 @@ function shouldUseChatId(chatId, phone) {
 }
 
 async function sendFollowUpMessage(chatId, phone, text) {
-    const { sendEcommerceText } = await import('./ecommerceSend.js');
+    const { sendInboxOutbound } = await import('./inboxOutbound.js');
     const message = String(text || '').trim();
     if (!message) return;
-    await sendEcommerceText({ chatId, phone, text: message });
+    await sendInboxOutbound({ chatId, phone, text: message });
 }
 
 function applyTag(phone, contactName, tagName) {

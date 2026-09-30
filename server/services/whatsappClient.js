@@ -10,6 +10,8 @@ import sessionBackup from '../utils/sessionBackup.js';
 import notifier from '../utils/notifier.js';
 import { persistInboxMessage, syncRecentInbox } from './inboxService.js';
 import { isAudioFile, normalizeAudioForWhatsApp } from '../utils/audioNormalize.js';
+import { isImageFile, normalizeImageForWhatsApp } from '../utils/imageNormalize.js';
+import { applyWwebjsMediaSanityPatch } from '../utils/wwebjsMediaPatch.js';
 import {
     normalizeMediaLayout,
     isImageOrVideoFile,
@@ -19,9 +21,9 @@ import {
 const { Client, LocalAuth, MessageMedia } = pkg;
 
 const BACKUP_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 horas
-/** Mantém lastActivityAt fresco com sessão idle (evita healthcheck-stale falso). Menor que HEALTHCHECK_STALE_MS típico (ex.: 30 min). */
-const ACTIVITY_HEARTBEAT_MS = 10 * 60 * 1000;
-const QR_MIN_DISPLAY_MS = 25 * 1000; // mesmo QR por 25s para dar tempo de escanear
+/** Ping real na página do WhatsApp. Só atualizar lastActivityAt escondia sessão morta. */
+const ACTIVITY_HEARTBEAT_MS = 3 * 60 * 1000;
+const PAGE_PING_TIMEOUT_MS = 8000;
 
 const __dirnameServices = path.dirname(fileURLToPath(import.meta.url));
 const WWEBJS_AUTH_ROOT = path.join(__dirnameServices, '..', '.wwebjs_auth');
@@ -54,7 +56,7 @@ export function resolveSessionDir(clientId) {
     return path.join(WWEBJS_AUTH_ROOT, sessionDirName);
 }
 
-const DELAY_BETWEEN_ATTACHMENTS_MS = 2500;
+const DELAY_BETWEEN_ATTACHMENTS_MS = 500;
 const GET_CHATS_TIMEOUT_MS = Number(process.env.GET_CHATS_TIMEOUT_MS) || 120000;
 const READY_DEBOUNCE_MS = 4000;
 const MEDIA_SEND_TIMEOUT_MS = Number(process.env.MEDIA_SEND_TIMEOUT_MS) || 120000;
@@ -69,7 +71,7 @@ function withOperationTimeout(promise, timeoutMs, label) {
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
-const MEDIA_UPLOAD_RETRYABLE = /media entry was not created|upload failed|media-fault|promise was collected|protocol error \(runtime\.callfunctionon\)|timeout ao enviar mídia|não confirmou o envio/i;
+const MEDIA_UPLOAD_RETRYABLE = /media entry was not created|upload failed|media-fault|promise was collected|protocol error \(runtime\.callfunctionon\)|timeout ao enviar mídia|não confirmou o envio|must include an id property|memoize|avparams is not a function/i;
 /** ACK vazio: a mídia muitas vezes já chegou no chat; não deve bloquear texto nem marcar o grupo como falha. */
 const EMPTY_MEDIA_ACK_MSG = 'WhatsApp não confirmou o envio do anexo (resposta vazia)';
 
@@ -126,8 +128,20 @@ function estimateMediaTimeoutMs(file) {
 }
 
 function buildAudioSendStrategies() {
-    // Nota de voz OGG/Opus — melhor compatibilidade Android + iPhone (evita documento).
+    // Nota de voz OGG/Opus — grupos e canais (voice é o tipo suportado em @newsletter).
     return [{ sendAudioAsVoice: true }];
+}
+
+/** Fallbacks de imagem/vídeo — WA Web às vezes quebra no upload “padrão”. */
+function buildImageSendStrategies({ forChannel = false } = {}) {
+    if (forChannel) {
+        // Canal não aceita documento — só imagem/vídeo nativo.
+        return [{}];
+    }
+    return [
+        {}, // imagem normal
+        { sendMediaAsDocument: true }, // fallback: envia como arquivo
+    ];
 }
 
 function sanitizeMediaFilename(name) {
@@ -136,6 +150,17 @@ function sanitizeMediaFilename(name) {
         .normalize('NFD')
         .replace(/\p{M}/gu, '');
     return base.slice(0, 120) || 'arquivo';
+}
+
+function guessMimetypeFromName(name) {
+    const n = String(name || '').toLowerCase();
+    if (n.endsWith('.png')) return 'image/png';
+    if (n.endsWith('.jpg') || n.endsWith('.jpeg')) return 'image/jpeg';
+    if (n.endsWith('.webp')) return 'image/webp';
+    if (n.endsWith('.gif')) return 'image/gif';
+    if (n.endsWith('.mp4')) return 'video/mp4';
+    if (n.endsWith('.pdf')) return 'application/pdf';
+    return '';
 }
 
 function resolveAudioMimetype(file) {
@@ -212,6 +237,8 @@ export class WhatsAppClient {
         this._initMutex = Promise.resolve();
         /** Serializa envios — evita uploads de mídia concorrentes no mesmo Chrome. */
         this._sendChain = Promise.resolve();
+        /** Disparo/envio em andamento — inbox não pode usar o mesmo Chrome. */
+        this._dispatchDepth = 0;
         this._clientEpoch = 0;
         this._getChatsInflight = null;
         this._chatsSyncInProgress = false;
@@ -285,6 +312,86 @@ export class WhatsAppClient {
     markActivity(source = 'unknown') {
         this.lastActivityAt = Date.now();
         logger.debug(`WhatsApp: atividade registrada (${source})`);
+    }
+
+    beginDispatch() {
+        this._dispatchDepth += 1;
+    }
+
+    endDispatch() {
+        this._dispatchDepth = Math.max(0, this._dispatchDepth - 1);
+    }
+
+    isDispatchActive() {
+        return this._dispatchDepth > 0;
+    }
+
+    /**
+     * Confirma que a página do WhatsApp Web ainda responde.
+     * Sessão ociosa fica "conectada" no painel com o Chrome morto — o primeiro envio falhava.
+     */
+    async ensurePageAlive(timeoutMs = 90000) {
+        if (this.isReconnecting || this.isRestarting) {
+            return this._waitForReady(timeoutMs);
+        }
+        if (!this.isReady || !this.client) return false;
+        const page = this.client.pupPage;
+        if (!page || page.isClosed()) {
+            this._logWarn('Pré-envio: página fechada — reconectando');
+            this.requestReconnect();
+            return this._waitForReady(timeoutMs);
+        }
+        try {
+            const alive = await Promise.race([
+                page.evaluate(() => {
+                    try {
+                        const state = window.require?.('WAWebSocketModel')?.Socket?.state;
+                        if (state) return state === 'CONNECTED';
+                    } catch (_) { /* módulo ainda não exposto */ }
+                    return !!window.WWebJS;
+                }),
+                new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('ping timeout')), PAGE_PING_TIMEOUT_MS);
+                }),
+            ]);
+            if (!alive) throw new Error('socket não CONNECTED');
+            this.markActivity('pre-send-ping');
+            return true;
+        } catch (err) {
+            this._logWarn('Pré-envio: sessão não respondeu, reconectando', err?.message || err);
+            this.requestReconnect();
+            return this._waitForReady(timeoutMs);
+        }
+    }
+
+    async _pingWhatsAppPage() {
+        if (!this.isReady || !this.client || this.isReconnecting || this.isRestarting) return;
+        if (this.isDispatchActive()) return;
+        const page = this.client.pupPage;
+        if (!page || page.isClosed()) {
+            this._logWarn('Heartbeat: página fechada — reconectando');
+            this.requestReconnect();
+            return;
+        }
+        try {
+            const alive = await Promise.race([
+                page.evaluate(() => {
+                    try {
+                        const state = window.require?.('WAWebSocketModel')?.Socket?.state;
+                        if (state) return state === 'CONNECTED';
+                    } catch (_) { /* ignore */ }
+                    return !!window.WWebJS;
+                }),
+                new Promise((_, reject) => {
+                    setTimeout(() => reject(new Error('ping timeout')), PAGE_PING_TIMEOUT_MS);
+                }),
+            ]);
+            if (!alive) throw new Error('socket não CONNECTED');
+            this.markActivity('heartbeat-ping');
+        } catch (err) {
+            this._logWarn('Heartbeat: página do WhatsApp não respondeu — reconectando', err?.message || err);
+            this.requestReconnect();
+        }
     }
 
     _clearPeriodicIntervals() {
@@ -399,8 +506,12 @@ export class WhatsAppClient {
         const authStrategy = this.authClientId
             ? new LocalAuth({ clientId: this.authClientId })
             : new LocalAuth();
+        // UA alinhado ao Chrome real (101 antigo atrapalha o pareamento do QR)
+        const userAgent = process.env.WWEBJS_USER_AGENT
+            || 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.31 Safari/537.36';
         const clientOptions = {
             authStrategy,
+            userAgent,
             puppeteer: {
                 headless: true,
                 ...(chromePath ? { executablePath: chromePath } : {}),
@@ -437,14 +548,9 @@ export class WhatsAppClient {
                 logger.debug('WhatsApp: QR ignorado (modo código de pareamento ativo)');
                 return;
             }
-            const now = Date.now();
-            const elapsed = now - this.lastQrUpdate;
-            // Mantém o mesmo QR por pelo menos QR_MIN_DISPLAY_MS para facilitar o scan
-            if (this.lastQrUpdate > 0 && elapsed < QR_MIN_DISPLAY_MS) {
-                logger.debug(`WhatsApp: QR ignorado (mostrando o anterior por mais ${Math.ceil((QR_MIN_DISPLAY_MS - elapsed) / 1000)}s)`);
-                return;
-            }
-            this.lastQrUpdate = now;
+            // Sempre atualiza: QR do WA expira rápido; throttle antigo (~25s) fazia a UI
+            // mostrar código já inválido e o scan "não conectar".
+            this.lastQrUpdate = Date.now();
             this.markActivity('qr');
             if (this.clearChatsOnQr) {
                 this._logInfo('QR Code recebido — limpando cache de grupos');
@@ -478,6 +584,12 @@ export class WhatsAppClient {
             this.authenticatedAt = 0;
             this.markActivity('ready');
 
+            try {
+                await applyWwebjsMediaSanityPatch(this.client?.pupPage);
+            } catch (err) {
+                this._logWarn('Patch de mídia não aplicado', err?.message || err);
+            }
+
             this._clearPeriodicIntervals();
 
             // Backup ao ficar pronto (intervalo mínimo entre cópias evita rajada em reconnect)
@@ -502,8 +614,9 @@ export class WhatsAppClient {
             }, BACKUP_INTERVAL_MS);
 
             this.activityHeartbeatInterval = setInterval(() => {
-                if (!this.isReady || !this.client) return;
-                this.markActivity('heartbeat');
+                this._pingWhatsAppPage().catch((err) => {
+                    this._logWarn('Heartbeat: falha inesperada', err?.message || err);
+                });
             }, ACTIVITY_HEARTBEAT_MS);
 
             if (this.onReadyCallback) {
@@ -532,6 +645,7 @@ export class WhatsAppClient {
                 // Poll leve: eventos message_* às vezes param após carga do Chrome; sync aciona o agente
                 if (this.inboxSyncInterval) clearInterval(this.inboxSyncInterval);
                 this.inboxSyncInterval = setInterval(() => {
+                    if (this.isDispatchActive()) return;
                     if (this.isReady && this.client) {
                         syncRecentInbox(this.client, {
                             chatLimit: 12,
@@ -548,6 +662,7 @@ export class WhatsAppClient {
                 // Sync completo (mídia/avatar) bem mais espaçado — não compete com o atendimento
                 if (this.inboxHeavySyncInterval) clearInterval(this.inboxHeavySyncInterval);
                 this.inboxHeavySyncInterval = setInterval(() => {
+                    if (this.isDispatchActive()) return;
                     if (this.isReady && this.client) {
                         syncRecentInbox(this.client, {
                             chatLimit: 30,
@@ -665,7 +780,7 @@ export class WhatsAppClient {
             this.client.on('message_create', async (msg) => {
                 if (clientEpoch !== this._clientEpoch || !this.isReady) return;
                 try {
-                    await persistInboxMessage(msg);
+                    await persistInboxMessage(msg, { channel: this.role });
                 } catch (err) {
                     this._logWarn('Inbox: erro ao registrar mensagem', err?.message || err);
                 }
@@ -675,7 +790,7 @@ export class WhatsAppClient {
             this.client.on('message', async (msg) => {
                 if (clientEpoch !== this._clientEpoch || !this.isReady) return;
                 try {
-                    await persistInboxMessage(msg);
+                    await persistInboxMessage(msg, { channel: this.role });
                 } catch (err) {
                     this._logWarn('Inbox: erro ao registrar mensagem (event message)', err?.message || err);
                 }
@@ -1399,6 +1514,14 @@ export class WhatsAppClient {
         const alreadyPrepared = !!(sendOpts && sendOpts.attachmentsPrepared);
         if (isAudio && !alreadyPrepared) {
             uploadFile = await normalizeAudioForWhatsApp(file);
+        } else if (isImageFile(file) && !alreadyPrepared) {
+            try {
+                uploadFile = await normalizeImageForWhatsApp(file);
+            } catch (err) {
+                logger.warn(
+                    `WhatsApp: falha ao normalizar imagem "${file.name || '?'}", usando original: ${err?.message || err}`,
+                );
+            }
         }
 
         const raw = uploadFile.data || '';
@@ -1408,16 +1531,23 @@ export class WhatsAppClient {
         const safeName = sanitizeMediaFilename(uploadFile.name);
         const mimetype = isAudio
             ? (uploadFile.type || 'audio/ogg; codecs=opus')
-            : (uploadFile.type || file.type || 'application/octet-stream');
-        const media = new MessageMedia(mimetype, base64Data, safeName);
+            : (uploadFile.type || file.type || guessMimetypeFromName(safeName) || 'application/octet-stream');
+        const filesize = Math.floor((base64Data.length * 3) / 4);
+        const media = new MessageMedia(mimetype, base64Data, safeName, filesize);
 
-        const strategies = isAudio ? buildAudioSendStrategies() : [{}];
+        const forChannel = isNewsletterChatId(chatId);
+        const strategies = isAudio
+            ? buildAudioSendStrategies()
+            : (isImageOrVideoFile(uploadFile) || isImageOrVideoFile(file)
+                ? buildImageSendStrategies({ forChannel })
+                : [{}]);
 
         let lastErr;
         for (let i = 0; i < strategies.length; i++) {
             try {
                 const { attachmentsPrepared: _prepared, ...waOpts } = sendOpts || {};
                 const opts = {
+                    linkPreview: false,
                     ...(caption ? { caption } : {}),
                     ...waOpts,
                     ...strategies[i]
@@ -1464,7 +1594,10 @@ export class WhatsAppClient {
     async _sendTextMessage(chatId, body, sendOpts) {
         const msg = String(body || '').trim();
         if (!msg) return;
-        await this.client.sendMessage(chatId, msg, sendOpts);
+        await this.client.sendMessage(chatId, msg, {
+            linkPreview: false,
+            ...(sendOpts || {}),
+        });
     }
 
     async _sendMessageImpl(chatId, text, attachments = [], options = {}) {

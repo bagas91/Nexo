@@ -60,19 +60,21 @@ const DEFAULT_CSAT = {
 const DEFAULT_ATTENDANCE = {
     enabled: true,
     defaultAgentId: 'ag_1',
+    /** Agente do WhatsApp de Disparo (Bispa / Palavra do Dia). Default = pastoral. */
+    dispatchAgentId: 'ag_1',
     provider: null,
     replyDelayMs: 2000,
     maxHistoryMessages: 14,
-    humanKeywords: ['humano', 'atendente', 'pessoa', 'falar com alguém', 'falar com alguem'],
-    handoffMessage: 'Entendi! Um atendente humano vai assumir em breve. Obrigada pela paciência! 🙏',
-    outsideHoursMessage: 'Olá! Nosso atendimento automático está disponível das 8h às 22h. Deixe sua mensagem que retornamos em breve. 🙏',
+    humanKeywords: ['humano', 'atendente', 'pessoa', 'falar com alguém', 'falar com alguem', 'falar com a bispa'],
+    handoffMessage: 'Recebi, amada(o)! ❤️ Já chamei alguém da equipe da Bispa Virgínia Arruda para te atender por aqui. Obrigada pela paciência! 🙏',
+    outsideHoursMessage: 'Olá! Que a paz do Senhor te alcance ❤️ Nosso atendimento automático funciona das 8h às 22h. Deixe sua mensagem que a equipe retorna em breve. 🙏',
     businessHours: {
         enabled: false,
         start: '08:00',
         end: '22:00',
         timezone: 'America/Sao_Paulo',
     },
-    /** Menu inicial estilo venda assistida (primeiro contato). */
+    /** Menu inicial estilo venda assistida (primeiro contato) — canal e-commerce. */
     welcomeMenuEnabled: true,
     welcomeMenuMessage: `Olá! Aqui é a assistente virtual da loja 💍✨
 
@@ -82,11 +84,22 @@ Como posso te ajudar? Responda com o número ou palavra-chave:
 2 — Ver semijoias e alianças 💍
 3 — Meu pedido / rastreio 🛒
 4 — Falar com um atendente 👤`,
+    /** Menu pastoral — canal Disparo / Palavra do Dia. */
+    dispatchWelcomeMenuEnabled: true,
+    dispatchWelcomeMenuMessage: `Olá, amada(o)! ❤️
+Aqui é a assistente virtual da Bispa Virgínia Arruda (Palavra do Dia).
+
+Como posso te acolher hoje? Responda com o número:
+
+1 — Pedido de oração 🙏
+2 — Cultos e onde assistir 📺
+3 — Redes da Bispa / loja / Concept ✨
+4 — Falar com a equipe 👤`,
     idleHumanAlertEnabled: true,
     idleHumanAlertMinutes: 5,
     idleHumanNotifyCustomer: true,
     idleHumanCustomerMessage:
-        'Desculpe a demora! Já chamei um atendente humano para te ajudar. Em instantes alguém assume por aqui. 🙏',
+        'Desculpe a demora, amada(o)! ❤️ Já chamei alguém da equipe para te ajudar. Em instantes alguém assume por aqui. 🙏',
 };
 
 export function getAttendanceConfig() {
@@ -106,6 +119,11 @@ export function getAttendanceConfig() {
             ? !!stored.welcomeMenuEnabled
             : DEFAULT_ATTENDANCE.welcomeMenuEnabled,
         welcomeMenuMessage: stored.welcomeMenuMessage || DEFAULT_ATTENDANCE.welcomeMenuMessage,
+        dispatchWelcomeMenuEnabled: stored.dispatchWelcomeMenuEnabled !== undefined
+            ? !!stored.dispatchWelcomeMenuEnabled
+            : DEFAULT_ATTENDANCE.dispatchWelcomeMenuEnabled,
+        dispatchWelcomeMenuMessage: stored.dispatchWelcomeMenuMessage
+            || DEFAULT_ATTENDANCE.dispatchWelcomeMenuMessage,
     };
 }
 

@@ -12,6 +12,8 @@ export type InboxConversation = {
   unread: number;
   status: string;
   mode: 'bot' | 'human';
+  /** dispatch = WhatsApp Web PDD; ecommerce = Meta loja */
+  channel?: 'dispatch' | 'ecommerce';
   updatedAt: number;
   avatarUrl?: string | null;
   needsHuman?: boolean;
@@ -197,9 +199,11 @@ const MediaBubble: React.FC<{ m: InboxMessage }> = ({ m }) => {
 type InboxPanelProps = {
   embedded?: boolean;
   className?: string;
+  /** Filtra conversas deste canal (PDD ou Loja). */
+  channel?: 'dispatch' | 'ecommerce';
 };
 
-const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '' }) => {
+const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '', channel }) => {
   const { showToast } = useToast();
   const backend = BackendService.getInstance();
   const [convs, setConvs] = useState<InboxConversation[]>([]);
@@ -248,7 +252,7 @@ const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '
 
   const loadConversations = useCallback(async () => {
     try {
-      const list = await backend.getInboxConversations();
+      const list = await backend.getInboxConversations(channel);
       setConvs(list as InboxConversation[]);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Erro ao carregar conversas';
@@ -260,7 +264,7 @@ const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '
     } finally {
       setLoading(false);
     }
-  }, [backend, showToast]);
+  }, [backend, channel, showToast]);
 
   useEffect(() => {
     if (filtered.length && (!selected || !filtered.some((c) => c.id === selected))) {
@@ -551,6 +555,11 @@ const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '
                       <div className="flex justify-between items-start gap-2">
                         <p className={`font-semibold text-sm truncate ${alert ? 'text-rose-700 dark:text-rose-300' : 'text-bs-text'}`}>
                           {c.contactName}
+                          {c.channel === 'ecommerce' ? (
+                            <span className="ml-1.5 text-[9px] font-semibold uppercase tracking-wide text-sky-600 dark:text-sky-400">Loja</span>
+                          ) : (
+                            <span className="ml-1.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">PDD</span>
+                          )}
                         </p>
                         {c.unread > 0 && <span className="bs-badge-accent normal-case text-[9px] shrink-0">{c.unread}</span>}
                       </div>
@@ -594,7 +603,11 @@ const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '
                     <Avatar name={active.contactName} url={active.avatarUrl} keyId={active.id} size={44} />
                     <div className="min-w-0">
                       <p className="font-bold text-bs-text truncate">{active.contactName}</p>
-                      <p className="text-xs text-bs-muted truncate">{formatPhoneLabel(active.phone)}</p>
+                      <p className="text-xs text-bs-muted truncate">
+                        {formatPhoneLabel(active.phone)}
+                        {' · '}
+                        {active.channel === 'ecommerce' ? 'E-commerce (Meta)' : 'Disparo (Palavra do Dia)'}
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 flex-wrap shrink-0">
@@ -730,6 +743,7 @@ const InboxPanel: React.FC<InboxPanelProps> = ({ embedded = false, className = '
               phone={active.phone}
               contactName={active.contactName}
               conversationId={active.id}
+              channel={channel || active.channel || 'dispatch'}
               className="max-h-[42vh] md:max-h-[50vh] xl:max-h-full"
               onProfileChange={() => void loadConversations()}
             />

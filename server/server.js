@@ -22,6 +22,7 @@ import notifier from './utils/notifier.js';
 import bulkSendReport from './utils/bulkSendReport.js';
 import aiService from './utils/aiService.js';
 import { authenticate, requireSuperadmin } from './middleware/authMiddleware.js';
+import { userHasModule } from './config/modules.js';
 import userService from './utils/userService.js';
 import imageService from './utils/imageService.js';
 import crypto from 'crypto';
@@ -32,6 +33,9 @@ import { handleBlingOAuthCallback } from './routes/blingOAuth.js';
 import { ensurePlatformDefaults } from './utils/platformDefaults.js';
 import { ensurePlatformSeeds } from './utils/platformSeeds.js';
 import { clientIp } from './utils/auditService.js';
+import { ensureWwebjsUtilsMediaPatch } from './utils/ensureWwebjsPatch.js';
+
+ensureWwebjsUtilsMediaPatch();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -294,7 +298,26 @@ app.use('/api/catalog', catalogRoutes);
 app.use('/api/admin', adminRoutes);
 
 app.get('/api/inbox/conversations', (req, res) => {
-    res.json(chatDB.listInboxConversations(200));
+    const q = String(req.query?.channel || '').toLowerCase();
+    let channel = q === 'ecommerce' || q === 'dispatch' ? q : null;
+
+    // Restringe ao canal liberado no perfil (exceto superadmin)
+    if (req.user?.role !== 'superadmin') {
+        const canDisp = userHasModule(req.user, 'crm_dispatch');
+        const canEcom = userHasModule(req.user, 'crm_ecommerce');
+        if (channel === 'dispatch' && !canDisp) {
+            return res.status(403).json({ error: 'Sem permissão para CRM Palavra.' });
+        }
+        if (channel === 'ecommerce' && !canEcom) {
+            return res.status(403).json({ error: 'Sem permissão para CRM Loja.' });
+        }
+        if (!channel) {
+            if (canDisp && !canEcom) channel = 'dispatch';
+            else if (canEcom && !canDisp) channel = 'ecommerce';
+        }
+    }
+
+    res.json(chatDB.listInboxConversations(200, channel ? { channel } : {}));
 });
 
 app.get('/api/inbox/conversations/:chatId/messages', (req, res) => {
@@ -358,18 +381,25 @@ app.post('/api/inbox/conversations/:chatId/test-agent', async (req, res) => {
         const chatId = decodeURIComponent(req.params.chatId);
         const conv = chatDB.getInboxConversation(chatId);
         if (!conv) return res.status(404).json({ error: 'Conversa não encontrada' });
-        const { isMetaConnected } = await import('./services/metaWhatsAppService.js');
-        const { isEcommerceWebForced, ecommerceClient } = await import('./services/whatsappHub.js');
-        const ready = isEcommerceWebForced()
-            ? !!ecommerceClient.getStatus().ready
-            : isMetaConnected();
-        if (!ready) return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
+        const { resolveInboxChannel } = await import('./services/inboxOutbound.js');
+        const channel = resolveInboxChannel(chatId, conv.channel);
+        if (channel === 'ecommerce') {
+            const { isMetaConnected } = await import('./services/metaWhatsAppService.js');
+            const { isEcommerceWebForced, ecommerceClient } = await import('./services/whatsappHub.js');
+            const ready = isEcommerceWebForced()
+                ? !!ecommerceClient.getStatus().ready
+                : isMetaConnected();
+            if (!ready) return res.status(409).json({ error: 'WhatsApp E-commerce não conectado' });
+        } else if (!dispatchClient.getStatus().ready) {
+            return res.status(409).json({ error: 'WhatsApp Disparo não conectado' });
+        }
         const { scheduleAgentReply } = await import('./services/attendanceService.js');
         scheduleAgentReply({
             chatId,
             phone: conv.phone,
             contactName: conv.contactName,
             body: req.body?.body || conv.lastMessage,
+            channel,
         });
         res.json({ success: true, message: 'Agente acionado — resposta em ~2s' });
     } catch (err) {
@@ -405,25 +435,13 @@ app.get('/api/inbox/avatars/:filename', async (req, res) => {
 
 app.post('/api/inbox/sync', async (req, res) => {
     try {
-        const { isMetaConnected } = await import('./services/metaWhatsAppService.js');
-        const { isEcommerceWebForced, ecommerceClient } = await import('./services/whatsappHub.js');
-        if (!isEcommerceWebForced()) {
-            if (!isMetaConnected()) {
-                return res.status(409).json({ error: 'Cloud API Meta não configurada' });
-            }
-            return res.json({
-                success: true,
-                skipped: true,
-                reason: 'E-commerce usa webhook da Cloud API — não há sync de chat Web.',
-            });
-        }
-        const status = ecommerceClient.getStatus();
-        if (!status.ready) {
-            return res.status(409).json({ error: 'WhatsApp E-commerce Web não conectado' });
+        // Sync Web do número de Disparo (pastoral). Meta Cloud não tem sync de chat.
+        if (!dispatchClient.getStatus().ready) {
+            return res.status(409).json({ error: 'WhatsApp Disparo não conectado' });
         }
         const { syncRecentInbox } = await import('./services/inboxService.js');
-        const result = await syncRecentInbox(ecommerceClient.client);
-        res.json({ success: true, ...result });
+        const result = await syncRecentInbox(dispatchClient.client);
+        res.json({ success: true, channel: 'dispatch', ...result });
     } catch (err) {
         res.status(500).json({ error: err?.message || String(err) });
     }
@@ -432,18 +450,20 @@ app.post('/api/inbox/sync', async (req, res) => {
 app.post('/api/inbox/reply', async (req, res) => {
     try {
         const { phone, text, chatId } = req.body || {};
-        const digits = String(phone || '').replace(/\D/g, '') || String(chatId || '').replace(/@c\.us/gi, '').replace(/\D/g, '');
+        const digits = String(phone || '').replace(/\D/g, '') || String(chatId || '').replace(/^meta:/i, '').replace(/@c\.us/gi, '').replace(/\D/g, '');
         const message = String(text || '').trim();
         if (!digits || !message) {
             return res.status(400).json({ error: 'Informe phone e text' });
         }
-        const { sendEcommerceText } = await import('./services/ecommerceSend.js');
-        await sendEcommerceText({ chatId, phone: digits, text: message });
+        const conv = chatId ? chatDB.getInboxConversation(chatId) : null;
+        const { sendInboxOutbound, resolveInboxChannel } = await import('./services/inboxOutbound.js');
+        const channel = resolveInboxChannel(chatId, conv?.channel);
+        await sendInboxOutbound({ chatId, phone: digits, text: message, channel });
         if (chatId) {
             chatDB.setInboxConversationMode(chatId, 'human');
             chatDB.setInboxConversationStatus(chatId, 'open');
         }
-        res.json({ success: true });
+        res.json({ success: true, channel });
     } catch (err) {
         res.status(500).json({ error: err?.message || String(err) });
     }
@@ -915,6 +935,7 @@ app.get('/api/history/today-count', (req, res) => {
 });
 
 app.post('/api/send', async (req, res) => {
+    let openedDispatch = false;
     try {
         const runtime = whatsappClient.getRuntimeStatus?.();
         if (runtime?.isRestarting) {
@@ -937,6 +958,12 @@ app.post('/api/send', async (req, res) => {
         logger.info(`📨 Pedido de envio recebido — Destino: "${chatName}" — ${dateStr} ${timeStr}`);
 
         sendInProgressCount += 1;
+        whatsappClient.beginDispatch();
+        openedDispatch = true;
+        const pageAlive = await whatsappClient.ensurePageAlive();
+        if (!pageAlive) {
+            return res.status(503).json({ error: 'WhatsApp não respondeu. Reconexão em andamento — tente de novo em instantes.' });
+        }
         await whatsappClient.sendMessage(chatId, content, attachments, { mediaLayout });
 
         const finishedAt = new Date();
@@ -949,13 +976,14 @@ app.post('/api/send', async (req, res) => {
         logger.error('API: Erro ao enviar mensagem', err.message, err);
         res.status(500).json({ error: err.message });
     } finally {
+        if (openedDispatch) whatsappClient.endDispatch();
         sendInProgressCount = Math.max(0, sendInProgressCount - 1);
     }
 });
 
-// --- Envio em massa (um grupo por vez, com intervalo fixo para evitar atrasos/entupimento) ---
-const DELAY_BETWEEN_SENDS_MS = 4000;
-const DELAY_BETWEEN_SENDS_WITH_ATTACHMENTS_MS = 7000;
+// --- Envio em massa (um grupo por vez, com intervalo curto entre destinos) ---
+const DELAY_BETWEEN_SENDS_MS = 2000;
+const DELAY_BETWEEN_SENDS_WITH_ATTACHMENTS_MS = 2000;
 const RETRY_AFTER_DETACHED_MS = 18000;
 const WAIT_FOR_READY_AFTER_RECONNECT_MS = Number(process.env.WAIT_FOR_READY_MS) || 120000; // 120s default; configurável via .env
 const SCHEDULE_SESSION_RETRY_MAX = 3; // mantém pending e retenta no próximo ciclo até N vezes quando sessão indisponível
@@ -1023,6 +1051,15 @@ async function maybeRunControlledRestart(reason) {
 }
 
 async function executeBulkSend(chatIds, content, attachments, meta = {}) {
+    whatsappClient.beginDispatch();
+    try {
+    return await executeBulkSendInner(chatIds, content, attachments, meta);
+    } finally {
+        whatsappClient.endDispatch();
+    }
+}
+
+async function executeBulkSendInner(chatIds, content, attachments, meta = {}) {
     const hasAttachments = attachments && attachments.length > 0;
     const delayMs = hasAttachments ? DELAY_BETWEEN_SENDS_WITH_ATTACHMENTS_MS : DELAY_BETWEEN_SENDS_MS;
     const results = { sent: 0, failed: 0, errors: [], skipped: 0 };
@@ -1039,6 +1076,22 @@ async function executeBulkSend(chatIds, content, attachments, meta = {}) {
     } = meta;
     const sendOptions = { mediaLayout };
     const sentIds = [...(Array.isArray(alreadySentIds) ? alreadySentIds : [])];
+
+    const pageAlive = await whatsappClient.ensurePageAlive();
+    if (!pageAlive) {
+        logger.error('Bulk: WhatsApp não ficou pronto após reconexão');
+        results.failed = chatIds.length;
+        results.sessionUnhealthy = true;
+        results.errors.push({
+            chatId: chatIds[0] || '',
+            chatName: chatIds[0] ? (whatsappClient.getChatName(chatIds[0]) || chatIds[0]) : '',
+            error: 'WhatsApp não respondeu. Reconexão em andamento — tente de novo em instantes.',
+        });
+        startSendProgress({ total: totalFull || total, source, sourceLabel, scheduleId });
+        finishSendProgress('failed');
+        emitBulkSendReport(results, { source, sourceLabel, scheduleId }, attachments);
+        return results;
+    }
 
     const persistCheckpoint = () => {
         if (!scheduleId || typeof chatDB.updateScheduleProgress !== 'function') return;
@@ -1604,8 +1657,13 @@ function clearAllOperationalData() {
     for (const id of scheduleIds) {
         removeScheduleAttachments(id);
     }
+    const inbox = typeof chatDB.clearInboxByChannel === 'function'
+        ? chatDB.clearInboxByChannel('dispatch')
+        : { conversations: 0, messages: 0 };
     logger.info('API: Dados operacionais limpos', {
         schedules: scheduleIds.length,
+        inboxConversations: inbox.conversations,
+        inboxMessages: inbox.messages,
     });
 }
 
@@ -1620,7 +1678,7 @@ app.post('/api/disconnect', async (req, res) => {
             success: true,
             role: client.role,
             message: client.role === WA_ROLES.DISPATCH
-                ? 'Disparo desconectado. Dados de grupos/agendamentos limpos.'
+                ? 'Disparo desconectado. Grupos, agendamentos e conversas do CRM Palavra limpos.'
                 : 'E-commerce desconectado.',
         });
     } catch (err) {

@@ -1,10 +1,11 @@
 /**
- * Prepara anexos uma vez por disparo (ffmpeg áudio → OGG/Opus).
+ * Prepara anexos uma vez por disparo (ffmpeg áudio → OGG/Opus; sharp imagem → JPEG).
  * Evita N conversões × N grupos competindo com Puppeteer.
  */
 
 import logger from './logger.js';
 import { isAudioFile, normalizeAudioForWhatsApp } from './audioNormalize.js';
+import { isImageFile, normalizeImageForWhatsApp } from './imageNormalize.js';
 
 /**
  * @param {Array<{ name?: string, type?: string, data?: string }>} attachments
@@ -22,6 +23,15 @@ export async function prepareAttachmentsForWhatsApp(attachments) {
             } catch (err) {
                 logger.warn(
                     `mediaPrepare: falha ao normalizar áudio "${file.name || '?'}", mantendo original: ${err?.message || err}`,
+                );
+                out.push(file);
+            }
+        } else if (isImageFile(file)) {
+            try {
+                out.push(await normalizeImageForWhatsApp(file));
+            } catch (err) {
+                logger.warn(
+                    `mediaPrepare: falha ao normalizar imagem "${file.name || '?'}", mantendo original: ${err?.message || err}`,
                 );
                 out.push(file);
             }

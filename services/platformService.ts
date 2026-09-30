@@ -320,7 +320,8 @@ export const platformService = {
     }>(`/crm/orders?phone=${encodeURIComponent(phone)}`);
   },
 
-  async listCrmDeals() {
+  async listCrmDeals(channel?: 'dispatch' | 'ecommerce') {
+    const q = channel ? `?channel=${encodeURIComponent(channel)}` : '';
     return api<{
       deals: Array<{
         id: string;
@@ -330,10 +331,104 @@ export const platformService = {
         stage: string;
         value: number;
         source?: string;
+        channel?: string;
         updatedAt: number;
       }>;
       stages: Array<{ id: string; label: string }>;
-    }>('/crm/deals');
+    }>(`/crm/deals${q}`);
+  },
+
+  async getSalesSummary(force = false) {
+    const q = force ? '?force=1' : '';
+    return api<{
+      connected: boolean;
+      today: { count: number; revenue: number; avgTicket: number };
+      yesterday: { count: number; revenue: number; avgTicket: number };
+      last7Days: { count: number; revenue: number; avgTicket: number };
+      last30Days: { count: number; revenue: number; avgTicket: number };
+      month: { count: number; revenue: number; avgTicket: number };
+      prevMonth?: { count: number; revenue: number; avgTicket: number };
+      byStatus: Array<{ status: string; count: number; revenue: number; avgTicket?: number }>;
+      byChannel?: Array<{
+        channel: string;
+        channelLabel: string;
+        channelName?: string;
+        count: number;
+        revenue: number;
+        avgTicket?: number;
+      }>;
+      daily: Array<{
+        date: string;
+        count: number;
+        revenue: number;
+        prevRevenue?: number;
+        prevCount?: number;
+        prevDate?: string;
+      }>;
+      recent: Array<{
+        id: string;
+        numero: string;
+        contactName: string;
+        status: string;
+        channel?: string;
+        channelLabel?: string;
+        channelName?: string;
+        total: number;
+        totalLabel: string;
+        date: string;
+      }>;
+      orders?: Array<{
+        id: string;
+        numero: string;
+        contactName: string;
+        status: string;
+        channel?: string;
+        channelLabel?: string;
+        channelName?: string;
+        total: number;
+        totalLabel: string;
+        date: string;
+      }>;
+      topProducts?: Array<{
+        name: string;
+        codigo?: string | null;
+        qty: number;
+        revenue: number;
+        orders: number;
+      }>;
+      topProductsSampled?: number;
+      openOrders?: number;
+      goal?: {
+        monthlyGoal: number;
+        achieved: number;
+        achievedPct: number;
+        expectedPct: number;
+        expectedRevenue: number;
+        gapVsExpected: number;
+        gapVsGoal: number;
+        pacePerDay: number;
+        daysRemaining: number;
+        dayOfMonth: number;
+        daysInMonth: number;
+      } | null;
+      todayForecast?: {
+        soFar: number;
+        count: number;
+        hoursElapsed: number;
+        forecast: number;
+        vsYesterdayPct: number | null;
+      } | null;
+      error?: string | null;
+      fetchedAt?: number;
+    }>(`/crm/sales-summary${q}`);
+  },
+
+  async getSalesDashboardConfig() {
+    return this.getKv<{ monthlyGoal?: number }>('sales_dashboard');
+  },
+
+  async setSalesDashboardConfig(body: { monthlyGoal?: number }) {
+    return this.setKv('sales_dashboard', body);
   },
 
   async createCrmDeal(body: {
@@ -345,6 +440,7 @@ export const platformService = {
     source?: string;
     conversationId?: string;
     notes?: string;
+    channel?: 'dispatch' | 'ecommerce';
   }) {
     return api<{ success: boolean; deal: Record<string, unknown> }>('/crm/deals', {
       method: 'POST',

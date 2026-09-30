@@ -7,6 +7,8 @@ export type ModuleId =
   | 'contacts'
   | 'conversations'
   | 'crm'
+  | 'crm_dispatch'
+  | 'crm_ecommerce'
   | 'campaigns'
   | 'templates'
   | 'scheduler'
@@ -32,8 +34,8 @@ export type ModuleDef = {
 export const APP_MODULES: ModuleDef[] = [
   { id: 'dashboard', label: 'Dashboard', group: 'inicio', groupLabel: 'Início' },
   { id: 'contacts', label: 'Contatos', group: 'atendimento', groupLabel: 'Atendimento' },
-  // Inbox WhatsApp compartilhado — quem tem CRM acessa o atendimento assistido.
-  { id: 'crm', label: 'CRM', group: 'atendimento', groupLabel: 'Atendimento' },
+  { id: 'crm_dispatch', label: 'CRM Palavra (disparo)', group: 'atendimento', groupLabel: 'Atendimento' },
+  { id: 'crm_ecommerce', label: 'CRM Loja (e-commerce)', group: 'atendimento', groupLabel: 'Atendimento' },
   { id: 'campaigns', label: 'Campanhas', group: 'atendimento', groupLabel: 'Atendimento' },
   { id: 'templates', label: 'Templates', group: 'ferramentas', groupLabel: 'Ferramentas' },
   { id: 'scheduler', label: 'Agendamentos', group: 'ferramentas', groupLabel: 'Ferramentas' },
@@ -67,8 +69,10 @@ export const GROUPDISPATCH_VIEWS = [
 export const VIEW_TO_MODULE: Record<string, ModuleId | null | undefined> = {
   dashboard: 'dashboard',
   contacts: 'contacts',
-  conversations: null, // só superadmin (WhatsApp pessoal)
-  crm: 'crm',
+  conversations: null, // só superadmin (legado)
+  crm: 'crm_ecommerce', // compat: “CRM” genérico → loja
+  crm_dispatch: 'crm_dispatch',
+  crm_ecommerce: 'crm_ecommerce',
   campaigns: 'campaigns',
   templates: 'templates',
   scheduler: 'scheduler',
@@ -110,7 +114,28 @@ export function userHasModule(
   if (moduleId === 'settings_profile') return true;
   const mods = user.modules || [];
   if (mods.includes('*')) return true;
-  return mods.includes(moduleId);
+  if (mods.includes(moduleId)) return true;
+  // Legado: módulo único "crm" liberava os dois CRMs
+  if ((moduleId === 'crm_dispatch' || moduleId === 'crm_ecommerce') && mods.includes('crm')) {
+    return true;
+  }
+  if (moduleId === 'crm' && (mods.includes('crm_dispatch') || mods.includes('crm_ecommerce'))) {
+    return true;
+  }
+  return false;
+}
+
+/** Tem acesso a pelo menos um CRM (Palavra ou Loja). */
+export function userHasAnyCrm(
+  user: { role?: string; modules?: string[] } | null | undefined,
+): boolean {
+  return userHasModule(user, 'crm_dispatch')
+    || userHasModule(user, 'crm_ecommerce')
+    || userHasModule(user, 'crm');
+}
+
+export function crmModuleForChannel(channel: 'dispatch' | 'ecommerce'): ModuleId {
+  return channel === 'ecommerce' ? 'crm_ecommerce' : 'crm_dispatch';
 }
 
 export function userHasAnyAppModule(user: { role?: string; modules?: string[] } | null | undefined): boolean {

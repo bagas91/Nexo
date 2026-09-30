@@ -140,7 +140,7 @@ export interface DispatchEntry {
   createdAt: number;
 }
 
-export type View = 'dashboard' | 'groups' | 'groupdispatch' | 'scheduler' | 'history' | 'settings' | 'categories' | 'library' | 'users' | 'whatsapp' | 'assistant' | 'templates' | 'calendar' | 'followups' | 'aiagents' | 'flows' | 'contacts' | 'conversations' | 'crm' | 'campaigns' | 'catalog' | 'admin';
+export type View = 'dashboard' | 'groups' | 'groupdispatch' | 'scheduler' | 'history' | 'settings' | 'categories' | 'library' | 'users' | 'whatsapp' | 'assistant' | 'templates' | 'calendar' | 'followups' | 'aiagents' | 'flows' | 'contacts' | 'conversations' | 'crm' | 'crm_dispatch' | 'crm_ecommerce' | 'campaigns' | 'catalog' | 'admin';
 
 export interface ChatMessage {
   role: 'user' | 'assistant';

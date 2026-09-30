@@ -8,7 +8,7 @@ import { ensurePlatformDefaults, getAttendanceConfig, getWebhookSecret } from '.
 import { ensurePlatformSeeds } from '../utils/platformSeeds.js';
 import { ensureEcommerceFollowUps } from '../utils/ecommerceFollowUps.js';
 import { processBlingWebhook } from '../services/integrationWebhookService.js';
-import { testBlingConnection, buildBlingAuthorizeUrl, ensureValidBlingToken } from '../services/blingService.js';
+import { testBlingConnection, buildBlingAuthorizeUrl, ensureValidBlingToken, fetchBlingSalesSummary } from '../services/blingService.js';
 import {
     CRM_STAGES,
     getCrmProfile,
@@ -427,13 +427,34 @@ router.get('/crm/orders', async (req, res) => {
     }
 });
 
-router.get('/crm/deals', (_req, res) => {
-    res.json({ deals: listCrmDeals(), stages: CRM_STAGES });
+router.get('/crm/deals', (req, res) => {
+    const q = String(req.query?.channel || '').toLowerCase();
+    const channel = q === 'dispatch' || q === 'ecommerce' ? q : null;
+    res.json({ deals: listCrmDeals(channel), stages: CRM_STAGES });
+});
+
+/** Resumo de vendas Bling (hoje + 7 dias) para o Dashboard. */
+router.get('/crm/sales-summary', async (req, res) => {
+    try {
+        const force = req.query?.force === '1' || req.query?.force === 'true';
+        const summary = await fetchBlingSalesSummary({ force });
+        res.json(summary);
+    } catch (err) {
+        res.status(400).json({
+            connected: false,
+            today: { count: 0, revenue: 0 },
+            last7Days: { count: 0, revenue: 0 },
+            recent: [],
+            error: err?.message || String(err),
+        });
+    }
 });
 
 router.post('/crm/deals', (req, res) => {
     try {
-        const deal = createCrmDeal(req.body || {});
+        const body = req.body || {};
+        if (!body.channel) body.channel = 'ecommerce';
+        const deal = createCrmDeal(body);
         res.status(201).json({ success: true, deal });
     } catch (err) {
         res.status(400).json({ error: err?.message || String(err) });

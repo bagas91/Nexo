@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { BackendService } from '../services/backendService';
 import { useToast } from '../contexts/ToastContext';
 
@@ -31,30 +31,38 @@ const MetaWhatsAppConnection: React.FC<MetaWhatsAppConnectionProps> = ({ onStatu
   const [accessToken, setAccessToken] = useState('');
   const [appSecret, setAppSecret] = useState('');
   const [testPhone, setTestPhone] = useState('');
+  const onStatusChangeRef = useRef(onStatusChange);
+  onStatusChangeRef.current = onStatusChange;
 
   const webhookUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
     return `${window.location.origin}/api/webhooks/meta-whatsapp`;
   }, []);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await backend.getMetaWhatsAppConfig();
-      setCfg(data || {});
-      setAccessToken('');
-      setAppSecret('');
-      onStatusChange?.(!!data?.connected);
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Erro ao carregar Cloud API', 'error');
-    } finally {
-      setLoading(false);
-    }
-  }, [backend, onStatusChange, showToast]);
-
+  // Carrega só no mount — onStatusChange inline do pai não pode re-disparar o fetch
+  // (senão o painel fica em loop "Carregando…" a cada poll de status).
   useEffect(() => {
-    load();
-  }, [load]);
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const data = await backend.getMetaWhatsAppConfig();
+        if (cancelled) return;
+        setCfg(data || {});
+        setAccessToken('');
+        setAppSecret('');
+        onStatusChangeRef.current?.(!!data?.connected);
+      } catch (err) {
+        if (!cancelled) {
+          showToast(err instanceof Error ? err.message : 'Erro ao carregar Cloud API', 'error');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only
+  }, []);
 
   const save = async () => {
     setSaving(true);
@@ -73,7 +81,7 @@ const MetaWhatsAppConnection: React.FC<MetaWhatsAppConnectionProps> = ({ onStatu
       setCfg(saved);
       setAccessToken('');
       setAppSecret('');
-      onStatusChange?.(!!saved.connected);
+      onStatusChangeRef.current?.(!!saved.connected);
       showToast(saved.connected ? 'Cloud API salva e conectada.' : 'Salvo — complete Phone Number ID e Token.', 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro ao salvar', 'error');
@@ -93,7 +101,7 @@ const MetaWhatsAppConnection: React.FC<MetaWhatsAppConnectionProps> = ({ onStatu
         appSecret: '••••••••',
       });
       setCfg(saved);
-      onStatusChange?.(false);
+      onStatusChangeRef.current?.(false);
       showToast('E-commerce Cloud API desconectado.', 'info');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Erro', 'error');

@@ -4,7 +4,7 @@ import { User, View } from '../types';
 import type { SettingsTab } from './SettingsView';
 import { BRANDING } from '../config/branding';
 import StudioCredit from './StudioCredit';
-import { canAccessView, SETTINGS_TAB_TO_MODULE, userHasModule } from '../config/modules';
+import { canAccessView, SETTINGS_TAB_TO_MODULE, userHasModule, userHasAnyCrm } from '../config/modules';
 import { useInboxNeedsHumanCount } from '../hooks/useInboxNeedsHumanCount';
 
 interface SidebarProps {
@@ -27,7 +27,8 @@ const INICIO: NavItem[] = [
 
 const ATENDIMENTO: NavItem[] = [
   { id: 'contacts', label: 'Contatos', icon: 'fa-address-book' },
-  { id: 'crm', label: 'CRM', icon: 'fa-chart-line' },
+  { id: 'crm_dispatch', label: 'CRM Palavra', icon: 'fa-book-open' },
+  { id: 'crm_ecommerce', label: 'CRM Loja', icon: 'fa-store' },
   { id: 'campaigns', label: 'Campanhas', icon: 'fa-bullhorn' },
 ];
 
@@ -117,8 +118,26 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (isSettingsView) setConfigOpen(true);
   }, [isSettingsView]);
 
-  const canCrmInbox = canAccessView(user, 'crm') || canAccessView(user, 'conversations');
-  const { count: needsHumanCount } = useInboxNeedsHumanCount(canCrmInbox);
+  const canCrmInbox = userHasAnyCrm(user) || canAccessView(user, 'conversations');
+  const { count: needsHumanDispatch } = useInboxNeedsHumanCount(
+    canCrmInbox && (user.role === 'superadmin' || userHasModule(user, 'crm_dispatch')),
+    8000,
+    'dispatch',
+  );
+  const { count: needsHumanEcommerce } = useInboxNeedsHumanCount(
+    canCrmInbox && (user.role === 'superadmin' || userHasModule(user, 'crm_ecommerce')),
+    8000,
+    'ecommerce',
+  );
+
+  useEffect(() => {
+    if (!canCrmInbox) return;
+    const total = needsHumanDispatch + needsHumanEcommerce;
+    const prev = document.title;
+    const base = BRANDING.productName;
+    document.title = total > 0 ? `(${total}) CRM · ${base}` : base;
+    return () => { document.title = prev; };
+  }, [canCrmInbox, needsHumanDispatch, needsHumanEcommerce]);
 
   const goSettings = (tab: SettingsTab) => {
     if (!canSettingsTab(user, tab)) return;
@@ -140,9 +159,14 @@ const Sidebar: React.FC<SidebarProps> = ({
       >
         <i className={`fa-solid ${item.icon} w-4 text-center text-[14px] ${showActive ? 'text-bs-accent' : 'text-bs-muted'}`} />
         <span className="flex-1 text-left">{item.label}</span>
-        {item.id === 'crm' && needsHumanCount > 0 && (
+        {item.id === 'crm_dispatch' && needsHumanDispatch > 0 && (
           <span className="min-w-[1.25rem] h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center animate-pulse">
-            {needsHumanCount > 99 ? '99+' : needsHumanCount}
+            {needsHumanDispatch > 99 ? '99+' : needsHumanDispatch}
+          </span>
+        )}
+        {item.id === 'crm_ecommerce' && needsHumanEcommerce > 0 && (
+          <span className="min-w-[1.25rem] h-5 px-1.5 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center animate-pulse">
+            {needsHumanEcommerce > 99 ? '99+' : needsHumanEcommerce}
           </span>
         )}
       </button>

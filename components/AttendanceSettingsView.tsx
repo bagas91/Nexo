@@ -7,6 +7,8 @@ import Toggle from './Toggle';
 export interface AttendanceConfig {
   enabled: boolean;
   defaultAgentId: string;
+  /** Agente do WhatsApp Disparo (Bispa / Palavra do Dia) */
+  dispatchAgentId?: string;
   provider: string | null;
   replyDelayMs: number;
   maxHistoryMessages: number;
@@ -28,6 +30,7 @@ export interface AttendanceConfig {
 const FALLBACK: AttendanceConfig = {
   enabled: true,
   defaultAgentId: 'ag_1',
+  dispatchAgentId: 'ag_1',
   provider: null,
   replyDelayMs: 2000,
   maxHistoryMessages: 14,
@@ -72,10 +75,12 @@ const AttendanceSettingsView: React.FC = () => {
 
   return (
     <div className="space-y-6 animate-fadeIn max-w-3xl">
-      <div>
-        <h2 className="bs-page-title">Atendimento automático</h2>
-        <p className="bs-page-desc mt-1">Agente de IA responde conversas privadas no WhatsApp conectado.</p>
-      </div>
+        <div>
+          <h2 className="bs-page-title">Atendimento automático</h2>
+          <p className="bs-page-desc mt-1">
+            IA responde no WhatsApp de Disparo (Bispa / Palavra do Dia) e no E-commerce (Meta / loja), cada um com seu agente.
+          </p>
+        </div>
 
       <div className="bs-section space-y-4">
         <div className="flex items-center justify-between gap-4">
@@ -86,26 +91,42 @@ const AttendanceSettingsView: React.FC = () => {
           <Toggle on={local.enabled} onChange={(v) => persist({ ...local, enabled: v })} />
         </div>
 
-        <div>
-          <label className="text-xs text-bs-muted mb-1 block">Agente padrão do inbox</label>
-          <select
-            className="bs-input"
-            value={local.defaultAgentId}
-            onChange={(e) => setLocal({ ...local, defaultAgentId: e.target.value })}
-          >
-            {agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}{a.active ? '' : ' (inativo)'}
-              </option>
-            ))}
-          </select>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div>
+            <label className="text-xs text-bs-muted mb-1 block">Agente — Disparo (Bispa / PDD)</label>
+            <select
+              className="bs-input"
+              value={local.dispatchAgentId || local.defaultAgentId}
+              onChange={(e) => setLocal({ ...local, dispatchAgentId: e.target.value })}
+            >
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}{a.active ? '' : ' (inativo)'}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-bs-muted mb-1 block">Agente — E-commerce (loja / Meta)</label>
+            <select
+              className="bs-input"
+              value={local.defaultAgentId}
+              onChange={(e) => setLocal({ ...local, defaultAgentId: e.target.value })}
+            >
+              {agents.map((a) => (
+                <option key={a.id} value={a.id}>
+                  {a.name}{a.active ? '' : ' (inativo)'}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
         {activeAgents.length === 0 && (
             <p className="text-xs text-amber-600 mt-1">Nenhum agente ativo — clique em &quot;Usar no inbox&quot; em Agentes de IA.</p>
           )}
           {local.enabled && activeAgents.length > 0 && !activeAgents.some((a) => a.id === local.defaultAgentId) && (
-            <p className="text-xs text-amber-600 mt-1">O agente selecionado está inativo — escolha um ativo ou use &quot;Usar no inbox&quot;.</p>
+            <p className="text-xs text-amber-600 mt-1">O agente de e-commerce está inativo — escolha um ativo ou use &quot;Usar no inbox&quot;.</p>
           )}
-        </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
