@@ -2175,8 +2175,9 @@ function startHealthcheckMonitor() {
             const unhealthyConnected =
                 status.ready && staleMs > HEALTHCHECK_STALE_MS && !busy;
 
-            // Nunca chegou a ready (UI em “sincronizando”) e sem QR — típico após reboot/lock do Chrome
-            const waitingForQr = Boolean(status.qr);
+            // QR do WhatsApp troca ~20s. Imagem parada é Chrome morto: o scan não autentica.
+            const qrAgeMs = runtime.lastQrUpdate ? now - runtime.lastQrUpdate : Infinity;
+            const waitingForQr = Boolean(status.qr) && qrAgeMs < 90 * 1000;
             const authAgeMs = runtime.authenticatedAt ? now - runtime.authenticatedAt : 0;
             const stuckAfterAuth =
                 !status.ready &&

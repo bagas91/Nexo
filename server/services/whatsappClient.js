@@ -289,6 +289,43 @@ export class WhatsAppClient {
         }
     }
 
+    /** Chrome restaura a aba anterior e abre um segundo web.whatsapp.com. O scan cai em "aberto em outra janela". */
+    _dropRestoredBrowserTabs() {
+        const def = path.join(this.sessionDir, 'Default');
+        for (const name of ['Last Session', 'Last Tabs', 'Current Session', 'Current Tabs']) {
+            try { fs.rmSync(path.join(def, name), { force: true }); } catch (_) {}
+        }
+        try { fs.rmSync(path.join(def, 'Sessions'), { recursive: true, force: true }); } catch (_) {}
+    }
+
+    async _claimSingleWhatsAppTab() {
+        const browser = this.client?.pupBrowser;
+        const main = this.client?.pupPage;
+        if (!browser || !main) return;
+        const pages = await browser.pages();
+        let closed = 0;
+        for (const page of pages) {
+            if (page === main) continue;
+            try {
+                await page.close();
+                closed += 1;
+            } catch (_) {}
+        }
+        let clicked = false;
+        try {
+            clicked = await main.evaluate(() => {
+                const nodes = [...document.querySelectorAll('button, div[role="button"]')];
+                const btn = nodes.find((el) => /use here/i.test(el.textContent || ''));
+                if (!btn) return false;
+                btn.click();
+                return true;
+            });
+        } catch (_) {}
+        if (closed || clicked) {
+            logger.warn(`WhatsApp: segunda janela removida (abas fechadas ${closed}, Use here ${clicked})`);
+        }
+    }
+
     /**
      * Encerra instância anterior, mata Chromes órfãos no mesmo perfil e limpa singleton (crash/restart).
      */
@@ -306,6 +343,7 @@ export class WhatsAppClient {
         this._killChromiumForSessionProfile();
         await new Promise((r) => setTimeout(r, 1000));
         this._removeChromiumSingletonArtifacts();
+        this._dropRestoredBrowserTabs();
         await new Promise((r) => setTimeout(r, 500));
     }
 
@@ -422,6 +460,7 @@ export class WhatsAppClient {
             lastRestartAt: this.lastRestartAt,
             authenticatedAt: this.authenticatedAt,
             lastLoadingPercent: this.lastLoadingPercent,
+            lastQrUpdate: this.lastQrUpdate,
         };
     }
 
@@ -463,8 +502,12 @@ export class WhatsAppClient {
                 this.isReady = false;
                 this.qrCode = null;
                 this._clearPeriodicIntervals();
-                const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
-                if (restore.success) logger.info('WhatsApp: Backup restaurado, reinicializando...');
+                if (!fs.existsSync(this.sessionDir)) {
+                    const restore = await sessionBackup.restore({ sessionDir: this.sessionDir });
+                    if (restore.success) logger.info('WhatsApp: Backup restaurado, reinicializando...');
+                } else {
+                    logger.info('WhatsApp: Reabrindo o perfil atual, sem restaurar backup');
+                }
                 await this.initialize();
             } catch (e) {
                 logger.error('WhatsApp: Erro na reconexão automática', e.message);
@@ -811,6 +854,20 @@ export class WhatsAppClient {
             await doInitialize();
             this.markActivity('initialize:done');
             logger.info('WhatsApp: client.initialize() concluído');
+            await this._claimSingleWhatsAppTab();
+            const browser = this.client?.pupBrowser;
+            if (browser && !browser.__nexoDisconnectHook) {
+                browser.__nexoDisconnectHook = true;
+                browser.on('disconnected', () => {
+                    if (clientEpoch !== this._clientEpoch) return;
+                    if (this.isReconnecting || this.isRestarting) return;
+                    logger.warn('WhatsApp: navegador encerrou — QR em memória fica inválido, reconectando');
+                    this.isReady = false;
+                    this.qrCode = null;
+                    this.lastQrUpdate = 0;
+                    this.requestReconnect();
+                });
+            }
         } catch (err) {
             const isContextDestroyed = err.message && (err.message.includes('Execution context was destroyed') || err.message.includes('Protocol error'));
             if (isContextDestroyed && !isRetry) {
